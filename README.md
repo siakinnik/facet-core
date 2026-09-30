@@ -49,6 +49,17 @@ Logs: `journalctl -u facet -f`. Update: run the same command again.
 Offline: download the archive from Releases and run
 `sudo scripts/get.sh --file facet-<version>-linux-<arch>.tar.gz`.
 
+Plugins are installed the same way from their own GitHub releases, e.g. the
+screen/camera plugin:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/siakinnik/facet-core/main/scripts/get.sh | sudo bash -s -- --plugin siakinnik/facet-display-power
+```
+
+`--remove-plugin <id>` removes one. A plugin release is an archive named
+`<repo>-<version>-linux-<arch>.tar.gz` whose top directory holds
+`manifest.json` and the executable.
+
 ## Build from source
 
 For development or unsupported architectures. Needs a C++20 compiler
