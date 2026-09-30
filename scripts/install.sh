@@ -95,9 +95,12 @@ have ninja && GENERATOR=(-G Ninja)
 # Plugins: explicit arguments, else every sibling facet-* project with a manifest.
 if [[ ${#PLUGINS[@]} -eq 0 ]]; then
     for d in "$CORE"/../facet-*/; do
+        [[ -f "$d/manifest.json" ]] || continue  # also skips the unexpanded pattern
         d="$(cd "$d" && pwd)"
-        [[ "$d" != "$CORE" && -f "$d/manifest.json" ]] && PLUGINS+=("$d")
+        [[ "$d" != "$CORE" ]] && PLUGINS+=("$d")
     done
+    [[ ${#PLUGINS[@]} -eq 0 ]] && echo "No plugins found next to $CORE (installing the core only)."
+    true
 fi
 
 json_field() {  # json_field <file> <key>: first top-level string value of "key"
