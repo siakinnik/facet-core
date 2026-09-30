@@ -264,6 +264,7 @@ void PluginHost::spawn(Plugin& p, double now) {
     hello["theme"] = theme_;
     hello["locale"] = locale_;
     hello["timezone"] = timezone_;
+    hello["content_width"] = content_width_;
     send(p, hello);
     if (p.visible) {
         Json v = Json::object();
@@ -628,6 +629,16 @@ void PluginHost::broadcast_activity() {
 }
 
 void PluginHost::set_theme(const std::string& theme) { theme_ = theme; }
+
+void PluginHost::set_content_width(int dp) {
+    if (dp == content_width_) return;
+    content_width_ = dp;
+    Json msg = Json::object();
+    msg["t"] = "layout";
+    msg["content_width"] = dp;
+    for (auto& p : plugins_)
+        if (p->state == State::Running) send(*p, msg);
+}
 
 void PluginHost::set_timezone(const std::string& zone) {
     if (zone == timezone_) return;

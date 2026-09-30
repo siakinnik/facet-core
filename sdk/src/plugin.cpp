@@ -113,6 +113,89 @@ Screen& Screen::button(std::string id, std::string label, std::string style) {
     return *this;
 }
 
+Screen& Screen::canvas(std::string id, float height, const Canvas& canvas) {
+    Json& j = add("canvas");
+    j["id"] = std::move(id);
+    j["height"] = height;
+    j["ops"] = canvas.ops();
+    return *this;
+}
+
+// ---------------------------------------------------------------- Canvas
+
+Json& Canvas::add(const char* op) {
+    Json item = Json::object();
+    item["op"] = op;
+    ops_.push_back(std::move(item));
+    return ops_.back();
+}
+
+namespace {
+void set_hit(Json& j, std::string hit, std::string pressed) {
+    if (!hit.empty()) j["hit"] = std::move(hit);
+    if (!pressed.empty()) j["pressed"] = std::move(pressed);
+}
+}  // namespace
+
+Canvas& Canvas::rect(float x, float y, float w, float h, std::string color, std::string hit, std::string pressed) {
+    Json& j = add("rect");
+    j["x"] = x, j["y"] = y, j["w"] = w, j["h"] = h;
+    j["color"] = std::move(color);
+    set_hit(j, std::move(hit), std::move(pressed));
+    return *this;
+}
+
+Canvas& Canvas::rrect(float x, float y, float w, float h, float radius, std::string color, std::string hit,
+                      std::string pressed) {
+    Json& j = add("rrect");
+    j["x"] = x, j["y"] = y, j["w"] = w, j["h"] = h, j["r"] = radius;
+    j["color"] = std::move(color);
+    set_hit(j, std::move(hit), std::move(pressed));
+    return *this;
+}
+
+Canvas& Canvas::circle(float cx, float cy, float r, std::string color, std::string hit, std::string pressed) {
+    Json& j = add("circle");
+    j["cx"] = cx, j["cy"] = cy, j["r"] = r;
+    j["color"] = std::move(color);
+    set_hit(j, std::move(hit), std::move(pressed));
+    return *this;
+}
+
+Canvas& Canvas::ring(float cx, float cy, float r, float width, std::string color) {
+    Json& j = add("ring");
+    j["cx"] = cx, j["cy"] = cy, j["r"] = r, j["width"] = width;
+    j["color"] = std::move(color);
+    return *this;
+}
+
+Canvas& Canvas::line(float x1, float y1, float x2, float y2, float width, std::string color) {
+    Json& j = add("line");
+    j["x1"] = x1, j["y1"] = y1, j["x2"] = x2, j["y2"] = y2, j["width"] = width;
+    j["color"] = std::move(color);
+    return *this;
+}
+
+Canvas& Canvas::text(float x, float y, float w, float h, std::string text, float size, std::string color,
+                     std::string align, std::string font) {
+    Json& j = add("text");
+    j["x"] = x, j["y"] = y, j["w"] = w, j["h"] = h;
+    j["text"] = std::move(text);
+    j["size"] = size;
+    j["color"] = std::move(color);
+    j["align"] = std::move(align);
+    j["font"] = std::move(font);
+    return *this;
+}
+
+Canvas& Canvas::icon(float x, float y, float size, std::string name, std::string color) {
+    Json& j = add("icon");
+    j["x"] = x, j["y"] = y, j["size"] = size;
+    j["name"] = std::move(name);
+    j["color"] = std::move(color);
+    return *this;
+}
+
 // ---------------------------------------------------------------- Plugin
 
 Plugin::Plugin(std::string id, std::string version)
@@ -177,6 +260,7 @@ void Plugin::handle(const Json& msg) {
         if (msg["data_dir"].is_string()) data_dir_ = msg["data_dir"].str();
         catalog_.set_language(i18n::normalize(msg["locale"].str()));
         if (msg["timezone"].is_string()) apply_timezone(msg["timezone"].str());
+        content_width_ = msg["content_width"].as_int(content_width_);
         Json reply = Json::object();
         reply["t"] = "hello";
         reply["api"] = kApiVersion;
@@ -201,6 +285,13 @@ void Plugin::handle(const Json& msg) {
         if (on_visible) on_visible(visible_);
     } else if (t == "event") {
         if (on_event) on_event(msg["id"].str(), msg["value"]);
+    } else if (t == "layout") {
+        int w = msg["content_width"].as_int(content_width_);
+        if (w != content_width_) {
+            content_width_ = w;
+            last_ui_ = Json();  // force re-sending the tree built for the new width
+            if (on_layout) on_layout(w);
+        }
     } else if (t == "timezone") {
         apply_timezone(msg["value"].str());
     } else if (t == "locale") {

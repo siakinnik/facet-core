@@ -11,6 +11,7 @@
 #include "app/app.h"
 #include "core/build_info.h"
 #include "core/timezone.h"
+#include "ui/canvas_ops.h"
 #include "i18n/i18n.h"
 
 namespace facet {
@@ -399,6 +400,9 @@ void App::render_plugin_ui(plugins::Plugin& p) {
             }
         } else if (type == "level") {
             ui_.level(label, float(ci["value"].as_number()), ci["text"].str());
+        } else if (type == "canvas") {
+            std::string hit = ui::draw_canvas(ui_, id, ci);
+            if (!hit.empty()) host_.send_event(p.m.id, id, hit);
         } else if (type == "button") {
             const std::string& st = ci["style"].str();
             auto style = st == "primary" ? ui::ButtonStyle::Primary

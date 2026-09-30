@@ -10,6 +10,7 @@ endif()
 
 option(FACET_WITH_X11 "Build the X11 development backend if libX11 is available" ON)
 option(FACET_STATIC "Link fully static (portable release binaries)" OFF)
+option(FACET_BUILD_EXAMPLES "Build the example plugins in examples/" ON)
 
 add_subdirectory(sdk)
 
@@ -33,6 +34,7 @@ add_executable(facet
     src/platform/headless.cpp
     src/platform/platform.cpp
     src/plugins/plugin_host.cpp
+    src/ui/canvas_ops.cpp
     src/ui/context.cpp
     src/ui/icons.cpp
     src/ui/theme.cpp
@@ -65,6 +67,10 @@ if(FACET_WITH_X11 AND NOT FACET_STATIC)  # no static libX11; release binaries ar
         target_compile_definitions(facet PRIVATE FACET_HAVE_X11)
         target_link_libraries(facet PRIVATE X11::X11)
     endif()
+endif()
+
+if(FACET_BUILD_EXAMPLES)
+    add_subdirectory(examples/pinpad)
 endif()
 
 install(TARGETS facet RUNTIME DESTINATION bin)

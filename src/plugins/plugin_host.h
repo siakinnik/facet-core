@@ -97,6 +97,7 @@ public:
     void set_theme(const std::string& theme);
     void set_locale(const std::string& lang);
     void set_timezone(const std::string& zone);  // "" = system zone
+    void set_content_width(int dp);              // width of canvas widgets
 
     // Screen policy from a running plugin with display.power, if any.
     std::optional<bool> display_policy() const;
@@ -118,6 +119,7 @@ private:
     std::string theme_ = "dark";
     std::string locale_ = "en";
     std::string timezone_;
+    int content_width_ = 440;
     bool changed_ = true;
 };
 

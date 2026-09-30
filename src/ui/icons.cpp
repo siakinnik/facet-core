@@ -16,6 +16,8 @@ Icon icon_from_name(std::string_view name) {
     if (name == "camera") return Icon::Camera;
     if (name == "settings") return Icon::Settings;
     if (name == "warning") return Icon::Warning;
+    if (name == "back") return Icon::Back;
+    if (name == "chevron") return Icon::Chevron;
     return Icon::Plugin;
 }
 

@@ -162,6 +162,10 @@ scripts/dev.sh smoke      # headless scripted run, screenshots in shots/
 scripts/check_i18n.py     # fails on non-English text outside i18n/ directories
 ```
 
+`examples/pinpad` is a small plugin (a PIN pad drawn with the canvas widget)
+that doubles as a template for new plugins; it is built with the core and
+loaded with `FACET_PLUGIN_PATH=build/examples`.
+
 In the X11 window the mouse acts as a finger and `q` quits. The headless
 backend replays `FACET_SCRIPT` (`tap x y`, `wait s`, `shot file.ppm`, ...).
 

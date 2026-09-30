@@ -1,0 +1,15 @@
+# Headless: open the example PIN pad plugin (second tile), type 1234, confirm.
+wait 3
+tap 943 446
+wait 1.5
+shot shots/80-pinpad.ppm
+tap 443 402
+wait 0.3
+tap 640 402
+wait 0.3
+tap 836 402
+wait 0.3
+tap 443 555
+wait 0.8
+shot shots/81-pinpad-typed.ppm
+quit

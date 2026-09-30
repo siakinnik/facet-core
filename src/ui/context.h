@@ -32,6 +32,11 @@ struct Pointer {
 
 class Context {
 public:
+    struct Press {
+        bool held = false;     // finger is down on it (and has not dragged away)
+        bool clicked = false;  // released on it this frame
+    };
+
     void begin_frame(gfx::Canvas& canvas, const Theme& theme, const Pointer& pointer, double now);
     void end_frame();
     // True when the UI needs another frame (animation, fling, layout settle).
@@ -68,6 +73,14 @@ public:
     // A tap that no widget claimed.
     bool background_tap() const;
 
+    // ---- Building blocks for custom widgets (e.g. plugin canvases).
+    // Touch target with a string id scoped to the current screen.
+    Press press(std::string_view id, const gfx::Rect& r);
+    // Full-width block of `height_dp` in the content column (outside cards).
+    gfx::Rect block(float height_dp);
+    // Content column width in dp for a canvas of `width_px` pixels.
+    static float content_width_dp(const Theme& theme, float width_px);
+
     void text(FontRole role, float size_dp, const gfx::Rect& box, std::string_view s, gfx::Color color,
               gfx::Align align = gfx::Align::Start);
     float text_width(FontRole role, float size_dp, std::string_view s);
@@ -75,10 +88,6 @@ public:
     std::vector<std::string> wrap(FontRole role, float size_dp, std::string_view s, float max_w);
 
 private:
-    struct Press {
-        bool held = false;
-        bool clicked = false;
-    };
     struct Scroll {
         float offset = 0, velocity = 0, content_h = 0, start_offset = 0;
         double last_move = 0;

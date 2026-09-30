@@ -91,6 +91,20 @@ Context::Press Context::interact(uint64_t id, const Rect& r) {
     return out;
 }
 
+Context::Press Context::press(std::string_view id, const Rect& r) { return interact(make_id(id), r); }
+
+Rect Context::block(float height_dp) {
+    close_group();
+    Rect r{col_x_, cursor_, col_w_, theme_->dp(height_dp)};
+    cursor_ += r.h + theme_->dp(Theme::kGap) * 1.5f;
+    return r;
+}
+
+float Context::content_width_dp(const Theme& theme, float width_px) {
+    // Mirrors begin_screen(): min(width - 2 gutters, max content), in dp.
+    return std::min(width_px / theme.scale - 2 * Theme::kGutter, Theme::kMaxContent);
+}
+
 int Context::repeat_steps(uint64_t id, const Rect& r) {
     Press pr = interact(id, r);
     if (pr.held) {

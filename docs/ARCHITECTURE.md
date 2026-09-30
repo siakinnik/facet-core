@@ -32,8 +32,10 @@ widget tree) and the core renders it with the same `ui::Context` the built-in
 screens use. That gives every plugin the same design, themes and scaling, and
 a plugin can be written in any language that reads and writes JSON lines.
 
-Later, a `canvas` widget (shared-memory drawing composited by the core) can
-cover plugins with custom graphics; the widget set is extensible.
+For custom graphics a plugin uses the `canvas` widget: it sends draw
+operations with theme colours and touch targets, and the core still renders
+them (3.5). A pixel-buffer canvas for video can follow; the widget set is
+extensible.
 
 ## 2. Core lifecycle
 
@@ -127,12 +129,13 @@ Core → plugin:
 
 | `t` | fields | meaning |
 |---|---|---|
-| `hello` | `api`, `data_dir`, `theme`, `locale`, `timezone` | first message |
+| `hello` | `api`, `data_dir`, `theme`, `locale`, `timezone`, `content_width` | first message |
 | `ping` | `seq` | watchdog, answer with `pong` |
 | `visible` | `value: bool` | the plugin screen was opened/closed |
 | `event` | `id`, `value` | the user changed a widget |
 | `locale` | `value` | UI language changed (`en`, `ru`, …); re-send UI and tile |
 | `timezone` | `value` | time zone changed (IANA id, `""` = system); the SDK applies it to `TZ` |
+| `layout` | `content_width` | width of the content column in dp changed (canvas width); re-send UI |
 | `activity` | — | the screen was touched (`display.power` only) |
 | `shutdown` | — | exit within 2 s |
 
@@ -162,7 +165,13 @@ Plugins send already-translated text: they get the language in `hello` and
     "min": 1, "max": 30, "step": 1, "unit": "s" },
   { "type": "time",    "id": "night_start", "label": "Night starts", "value": 1380, "step": 15 },
   { "type": "button",  "id": "rescan", "label": "Find cameras again", "style": "normal" },
-  { "type": "note",    "text": "Small explanatory text" }
+  { "type": "note",    "text": "Small explanatory text" },
+  { "type": "canvas",  "id": "pad", "height": 360, "ops": [
+    { "op": "rrect", "x": 0, "y": 0, "w": 100, "h": 76, "r": 18,
+      "color": "surface", "hit": "1", "pressed": "surface_pressed" },
+    { "op": "text",  "x": 0, "y": 0, "w": 100, "h": 76, "text": "1",
+      "size": 32, "color": "text", "align": "center", "font": "light" }
+  ]}
 ]}
 ```
 
@@ -171,9 +180,36 @@ Plugins send already-translated text: they get the language in `hello` and
 feedback) and sends `event`; the plugin answers with a new tree. The widget
 set equals the `ui::Context` API, so built-in screens and plugins look alike.
 
+#### Canvas: custom drawing
+
+`canvas` lets a plugin draw its own UI (PIN pads, gauges, keyboards) while
+the core still does all rendering. It spans the content column
+(`content_width` dp, from `hello` and `layout`) and is `height` dp tall; ops
+use dp relative to its top-left corner and are clipped to it.
+
+| `op` | fields |
+|---|---|
+| `rect` | `x`, `y`, `w`, `h`, `color` |
+| `rrect` | `x`, `y`, `w`, `h`, `r`, `color` |
+| `circle` | `cx`, `cy`, `r`, `color` |
+| `ring` | `cx`, `cy`, `r`, `width`, `color` |
+| `line` | `x1`, `y1`, `x2`, `y2`, `width`, `color` |
+| `text` | `x`, `y`, `w`, `h`, `text`, `size`, `color`, `align` (`start`/`center`/`end`), `font` (`regular`/`medium`/`light`) |
+| `icon` | `x`, `y`, `size`, `name`, `color` |
+
+Colours are theme tokens (`bg`, `surface`, `surface_pressed`, `text`,
+`text_dim`, `accent`, `on_accent`, `divider`, `track`, `good`, `warn`, `bad`),
+so custom drawing follows the dark/light theme, or `#RRGGBB[AA]`. A `rect`,
+`rrect` or `circle` with `hit` is a touch target: the core shows `pressed`
+(or a derived colour) while it is held, without a round trip, and sends
+`event` with the canvas `id` and the hit id as `value` on tap. Input that must
+stay private (PIN) is best drawn this way: it never leaves the plugin.
+`examples/pinpad` is a complete example and a template for new plugins.
+
 C++ plugins use `facet_sdk` (`sdk/`): JSON, the message loop
-(`facet::sdk::Plugin`), the screen builder (`facet::sdk::Screen`) and the
-translation catalog (`plugin.catalog()`, `plugin.tr()`).
+(`facet::sdk::Plugin`), the screen builder (`facet::sdk::Screen`), the canvas
+builder (`facet::sdk::Canvas`) and the translation catalog (`plugin.catalog()`,
+`plugin.tr()`).
 
 ## 4. Screen power
 
@@ -244,4 +280,4 @@ redrawn in full, which is slow on 4K panels; dirty-region rendering is next.
 
 - plugin sandboxing (separate uid, seccomp, cgroup limits), after the store;
 - plugin signing;
-- the `canvas` widget with shared memory.
+- a pixel-buffer (shared memory) canvas for video and camera views.
