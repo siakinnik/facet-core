@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build fonts-dejavu-core libx11-dev
+
+      - name: Check that code is English (translations only in i18n/)
+        run: python3 scripts/check_i18n.py
+
+      - name: Check shell scripts
+        run: for f in scripts/*.sh scripts/ci/*.sh; do bash -n "$f"; done
+
+      - name: Build (with the X11 dev backend)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Build (static, as released)
+        run: |
+          cmake -S . -B build-static -G Ninja -DCMAKE_BUILD_TYPE=Release -DFACET_STATIC=ON
+          cmake --build build-static
+
+      - name: Smoke test
+        run: bash scripts/ci/smoke.sh build-static/facet

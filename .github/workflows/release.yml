@@ -1,0 +1,139 @@
+name: Release
+
+# Run from the Actions tab ("Run workflow"): tags the current commit with the
+# version from CMakeLists.txt, builds static binaries for every architecture
+# and publishes a GitHub release. Pushing a matching tag by hand works too.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check translations
+        run: python3 scripts/check_i18n.py
+
+      - name: Determine version and tag
+        id: version
+        run: |
+          version="$(bash scripts/version.sh)"
+          tag="v$version"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            if [[ "$GITHUB_REF_NAME" != "$tag" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match version $version in CMakeLists.txt"
+              exit 1
+            fi
+          else
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              echo "::error::Tag $tag already exists. Bump the version in CMakeLists.txt first."
+              exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "Facet $version"
+            git push origin "$tag"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then echo "prerelease=true"; else echo "prerelease=false"; fi >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            cxx: g++
+            packages: ""
+            runner: ""
+            cmake_cross: ""
+          - arch: aarch64
+            cxx: aarch64-linux-gnu-g++
+            packages: g++-aarch64-linux-gnu
+            runner: qemu-aarch64-static
+            cmake_cross: -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+          - arch: armv7
+            cxx: arm-linux-gnueabihf-g++
+            packages: g++-arm-linux-gnueabihf
+            runner: qemu-arm-static
+            cmake_cross: -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=armv7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build fonts-dejavu-core qemu-user-static ${{ matrix.packages }}
+
+      - name: Build static binary
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFACET_STATIC=ON \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} ${{ matrix.cmake_cross }}
+          cmake --build build
+          file build/facet
+
+      - name: Smoke test
+        env:
+          FACET_RUNNER: ${{ matrix.runner }}
+        run: bash scripts/ci/smoke.sh build/facet
+
+      - name: Package
+        run: bash scripts/ci/package.sh build/facet "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: facet-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          Install or update on a device (x86_64, aarch64, armv7):
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/get.sh | sudo bash -s -- --version ${TAG}
+          \`\`\`
+          EOF
+          flags=()
+          [[ "${{ needs.prepare.outputs.prerelease }}" == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Facet $VERSION" --notes-file notes.md --generate-notes "${flags[@]}"
