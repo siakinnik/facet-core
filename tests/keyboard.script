@@ -1,0 +1,22 @@
+# Headless (1280x1700, scale 1.6667, en): type into a normal field with the
+# keyboard plugin, submit, then focus the secure field (built-in keyboard).
+wait 3
+tap 943 446
+wait 1.5
+tap 640 1174
+wait 1
+shot shots/91-kb-plugin.ppm
+tap 766 1450
+wait 0.5
+tap 956 1354
+wait 0.5
+shot shots/92-typed.ppm
+tap 1150 1644
+wait 1
+shot shots/93-submitted.ppm
+tap 640 1388
+wait 1
+tap 766 1450
+wait 0.5
+shot shots/94-secure.ppm
+quit

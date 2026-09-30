@@ -65,6 +65,10 @@ struct Plugin {
     std::string tile_subtitle;
     std::optional<bool> display;
     bool visible = false;
+
+    // Keyboard plugins: the drawing they last sent for the open keyboard.
+    Json keyboard_ops;
+    float keyboard_height = 0;
 };
 
 class PluginHost {
@@ -92,7 +96,8 @@ public:
     bool is_enabled(const std::string& id) const;
     void restart(const std::string& id, double now);
     void set_visible(const std::string& id, bool visible);
-    void send_event(const std::string& id, const std::string& widget, const Json& value);
+    void send_event(const std::string& id, const std::string& widget, const Json& value,
+                    const std::string& action = {});
     void broadcast_activity();
     void set_theme(const std::string& theme);
     void set_locale(const std::string& lang);
@@ -101,6 +106,17 @@ public:
 
     // Screen policy from a running plugin with display.power, if any.
     std::optional<bool> display_policy() const;
+
+    // ---- Keyboard plugins (capability input.keyboard).
+    bool keyboard_ready(const std::string& id) const;  // running and has drawn itself
+    void keyboard_show(const std::string& id, const std::string& mode, float width,
+                       const std::vector<std::string>& langs);
+    void keyboard_key(const std::string& id, const std::string& hit);
+    void keyboard_hide(const std::string& id);
+    struct InputAction {
+        std::string plugin, action, text;  // action: insert|backspace|enter|hide
+    };
+    std::vector<InputAction> take_input();
 
 private:
     void spawn(Plugin& p, double now);
@@ -120,6 +136,7 @@ private:
     std::string locale_ = "en";
     std::string timezone_;
     int content_width_ = 440;
+    std::vector<InputAction> input_;
     bool changed_ = true;
 };
 

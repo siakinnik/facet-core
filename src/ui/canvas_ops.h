@@ -18,4 +18,7 @@ gfx::Color color_from(const Theme& theme, std::string_view value, gfx::Color fal
 // current screen. Returns the `hit` id tapped this frame, or "".
 std::string draw_canvas(Context& ui, std::string_view id, const Json& node);
 
+// Draws `ops` inside `box` (e.g. a keyboard overlay). Returns the tapped hit id.
+std::string draw_ops(Context& ui, std::string_view id, const Json& ops, const gfx::Rect& box);
+
 }  // namespace facet::ui

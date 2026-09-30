@@ -17,6 +17,7 @@ add_subdirectory(sdk)
 add_executable(facet
     src/main.cpp
     src/app/app.cpp
+    src/app/keyboard.cpp
     src/app/screens.cpp
     src/core/build_info.cpp
     src/core/config.cpp
@@ -68,6 +69,9 @@ if(FACET_WITH_X11 AND NOT FACET_STATIC)  # no static libX11; release binaries ar
         target_link_libraries(facet PRIVATE X11::X11)
     endif()
 endif()
+
+# Bundled plugins, installed with the core.
+add_subdirectory(plugins/keyboard)
 
 if(FACET_BUILD_EXAMPLES)
     add_subdirectory(examples/pinpad)

@@ -113,6 +113,19 @@ Screen& Screen::button(std::string id, std::string label, std::string style) {
     return *this;
 }
 
+Screen& Screen::text_field(std::string id, std::string label, std::string value, std::string placeholder,
+                           bool secure, std::string mode, int max_length) {
+    Json& j = add("text");
+    j["id"] = std::move(id);
+    j["label"] = std::move(label);
+    j["value"] = std::move(value);
+    j["placeholder"] = std::move(placeholder);
+    j["secure"] = secure;
+    j["mode"] = std::move(mode);
+    j["max"] = max_length;
+    return *this;
+}
+
 Screen& Screen::canvas(std::string id, float height, const Canvas& canvas) {
     Json& j = add("canvas");
     j["id"] = std::move(id);
@@ -245,6 +258,22 @@ void Plugin::set_tile(const std::string& subtitle) {
     send(msg);
 }
 
+void Plugin::keyboard_ui(float height, const Canvas& canvas) {
+    Json msg = Json::object();
+    msg["t"] = "keyboard_ui";
+    msg["height"] = height;
+    msg["ops"] = canvas.ops();
+    send(msg);
+}
+
+void Plugin::input(const std::string& action, const std::string& text) {
+    Json msg = Json::object();
+    msg["t"] = "input";
+    msg["action"] = action;
+    if (!text.empty()) msg["text"] = text;
+    send(msg);
+}
+
 void Plugin::request_display(bool on) {
     if (last_display_ == int(on)) return;
     last_display_ = int(on);
@@ -284,7 +313,19 @@ void Plugin::handle(const Json& msg) {
         visible_ = msg["value"].as_bool();
         if (on_visible) on_visible(visible_);
     } else if (t == "event") {
-        if (on_event) on_event(msg["id"].str(), msg["value"]);
+        if (msg["action"].str() == "submit") {
+            if (on_submit) on_submit(msg["id"].str(), msg["value"].str());
+        } else if (on_event) {
+            on_event(msg["id"].str(), msg["value"]);
+        }
+    } else if (t == "keyboard_show") {
+        std::vector<std::string> langs;
+        for (const auto& l : msg["langs"].items()) langs.push_back(l.str());
+        if (on_keyboard_show) on_keyboard_show(msg["mode"].as_string("text"), float(msg["width"].as_number(400)), langs);
+    } else if (t == "keyboard_key") {
+        if (on_keyboard_key) on_keyboard_key(msg["hit"].str());
+    } else if (t == "keyboard_hide") {
+        if (on_keyboard_hide) on_keyboard_hide();
     } else if (t == "layout") {
         int w = msg["content_width"].as_int(content_width_);
         if (w != content_width_) {

@@ -22,6 +22,7 @@ namespace facet::ui {
 enum class Tone { Normal, Dim, Good, Warn, Bad };
 enum class ButtonStyle { Normal, Primary, Danger };
 enum class HeaderHit { None, Back, Action };
+enum class InputMode { Text, Number };
 
 struct Pointer {
     float x = 0, y = 0;
@@ -65,6 +66,41 @@ public:
     bool time(std::string_view id, std::string_view label, int& minutes, int step = 15);
     void level(std::string_view label, float value, std::string_view text = {});
     bool button(std::string_view id, std::string_view label, ButtonStyle style = ButtonStyle::Normal);
+
+    // ---- Text input. Tapping the field focuses it; the app then shows a
+    // keyboard and feeds its keys through push_edit().
+    struct TextOptions {
+        std::string_view placeholder;
+        bool secure = false;  // shown as dots; never handed to keyboard plugins
+        InputMode mode = InputMode::Text;
+        size_t max_length = 256;  // in characters
+    };
+    struct TextResult {
+        bool changed = false;
+        bool submitted = false;  // "Done" pressed (the field loses focus)
+    };
+    TextResult text_field(std::string_view id, std::string_view label, std::string& value,
+                          const TextOptions& options);
+
+    struct Focus {
+        uint64_t id = 0;
+        bool secure = false;
+        InputMode mode = InputMode::Text;
+    };
+    const Focus& focus() const { return focus_; }
+    bool has_focus() const { return focus_.id != 0; }
+    void blur();
+    enum class EditKind { Insert, Backspace, Enter };
+    // Queues a keyboard action for the focused field (applied next frame).
+    void push_edit(EditKind kind, std::string text = {});
+
+    // ---- Overlay (keyboard) at the bottom of the screen: widgets under it do
+    // not react and the scroll viewport ends above it. Widgets drawn between
+    // begin_overlay()/end_overlay() are the overlay itself.
+    void set_overlay(const gfx::Rect& r) { overlay_ = r; }
+    const gfx::Rect& overlay() const { return overlay_; }
+    void begin_overlay() { in_overlay_ = true; }
+    void end_overlay() { in_overlay_ = false; }
 
     // ---- Free-layout building blocks (menus, dashboards).
     bool tile(std::string_view id, const gfx::Rect& r, std::string_view title, std::string_view subtitle,
@@ -140,6 +176,13 @@ private:
     std::unordered_map<uint64_t, Scroll> scroll_;
     std::unordered_map<uint64_t, float> group_h_;
     Popup popup_;
+
+    Focus focus_;
+    bool focus_touched_ = false;  // a text field took this frame's press
+    bool ensure_visible_ = false;  // scroll the focused field into view
+    std::vector<std::pair<EditKind, std::string>> edits_;
+    gfx::Rect overlay_;
+    bool in_overlay_ = false;
     uint64_t popup_result_id_ = 0;
     int popup_result_ = -1;
 };

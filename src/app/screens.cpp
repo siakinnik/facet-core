@@ -245,6 +245,22 @@ void App::draw_settings(double t) {
 
     draw_timezone_settings();
 
+    // Keyboard: built-in or any installed keyboard plugin.
+    ui_.section(tr("Input"));
+    {
+        std::vector<std::string> ids = {"builtin"}, names = {tr("Built-in")};
+        for (const auto& p : host_.plugins())
+            if (p->m.can("input.keyboard")) {
+                ids.push_back(p->m.id);
+                names.push_back(p->m.name.get(catalog().language()));
+            }
+        std::string cur = config_.get_str("keyboard", "keyboard");
+        int ki = 0;
+        for (size_t i = 0; i < ids.size(); ++i)
+            if (ids[i] == cur) ki = int(i);
+        if (ui_.select("keyboard", tr("Keyboard"), names, ki)) config_.set("keyboard", ids[size_t(ki)]);
+    }
+
     ui_.section(tr("Plugins"));
     const std::string& lang = catalog().language();
     if (host_.plugins().empty()) ui_.info(tr("No plugins found"), "", ui::Tone::Dim);
@@ -400,6 +416,20 @@ void App::render_plugin_ui(plugins::Plugin& p) {
             }
         } else if (type == "level") {
             ui_.level(label, float(ci["value"].as_number()), ci["text"].str());
+        } else if (type == "text") {
+            std::string v = ci["value"].str();
+            const std::string placeholder = ci["placeholder"].str();
+            ui::Context::TextOptions o;
+            o.placeholder = placeholder;
+            o.secure = ci["secure"].as_bool();
+            o.mode = ci["mode"].str() == "number" ? ui::InputMode::Number : ui::InputMode::Text;
+            o.max_length = size_t(std::clamp(ci["max"].as_int(256), 1, 4096));
+            ui::Context::TextResult r = ui_.text_field(id, label, v, o);
+            if (r.changed) {
+                it["value"] = v;
+                host_.send_event(p.m.id, id, v);
+            }
+            if (r.submitted) host_.send_event(p.m.id, id, v, "submit");
         } else if (type == "canvas") {
             std::string hit = ui::draw_canvas(ui_, id, ci);
             if (!hit.empty()) host_.send_event(p.m.id, id, hit);

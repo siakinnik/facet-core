@@ -221,6 +221,7 @@ int App::run() {
         platform_->pump(events);
         host_.process(t);
         if (host_.take_changed()) dirty_ = true;
+        take_plugin_input();
         drew_ = false;
         handle_events(events, t);
         tick(t);
@@ -241,6 +242,7 @@ void App::run_frame(double t) {
     moved_ = false;
     update_theme(false);
     ui_.begin_frame(canvas_, theme_, pointer_, t);
+    ui_.set_overlay(kb_rect_);  // keyboard area of the previous frame
     switch (view_) {
         case View::Splash: draw_splash(); break;
         case View::Menu: draw_menu(); break;
@@ -248,7 +250,12 @@ void App::run_frame(double t) {
         case View::Settings: draw_settings(t); break;
         case View::Plugin: draw_plugin(t); break;
     }
+    draw_keyboard();
     ui_.end_frame();
+    // Keys of the built-in keyboard reach the field on the next frame.
+    for (auto& [action, text] : kb_pending_) apply_key(action, text);
+    if (!kb_pending_.empty()) dirty_ = true;
+    kb_pending_.clear();
     drawn_minute_ = local_now().tm_min;
     drew_ = true;
     dirty_ = dirty_ || ui_.wants_redraw();

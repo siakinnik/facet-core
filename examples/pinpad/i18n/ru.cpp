@@ -13,6 +13,18 @@ const facet::i18n::Table& ru() {
         {"Result", "Результат"},
         {"PIN accepted", "PIN принят"},
         {"Enter a PIN", "Введите PIN"},
+        {"Text input", "Ввод текста"},
+        {"Name", "Имя"},
+        {"Tap to type", "Коснитесь, чтобы ввести"},
+        {"Amount", "Сумма"},
+        {"Password", "Пароль"},
+        {"Hidden", "Скрыт"},
+        {"Submitted", "Отправлено"},
+        {"password ({} characters)", "пароль ({} символов)"},
+        {"The password field is secure: it always uses the built-in keyboard, "
+         "so keyboard plugins never see it.",
+         "Поле пароля защищённое: для него всегда используется встроенная клавиатура, "
+         "поэтому плагины клавиатуры его не видят."},
         {"Drawn by the plugin with canvas operations; colours follow the theme. "
          "The digits never leave this plugin and are not stored.",
          "Нарисовано самим плагином командами холста; цвета следуют теме. "

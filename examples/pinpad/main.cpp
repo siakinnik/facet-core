@@ -35,6 +35,12 @@ public:
                 pin_ += key;
             }
             accepted_ = false;
+        } else if (id == "name") {
+            name_ = value.str();
+        } else if (id == "amount") {
+            amount_ = value.str();
+        } else if (id == "secret") {
+            secret_ = value.str();  // secure field: arrives here only, never via keyboard plugins
         } else if (id == "ok" && pin_.size() >= kMinDigits) {
             accepted_ = true;
             pin_.clear();  // a real plugin would use it here, then forget it
@@ -93,11 +99,27 @@ private:
         if (accepted_) s.info(plugin_.tr("Result"), plugin_.tr("PIN accepted"), "good");
         s.note(plugin_.tr("Drawn by the plugin with canvas operations; colours follow the theme. "
                           "The digits never leave this plugin and are not stored."));
+
+        s.section(plugin_.tr("Text input"));
+        s.text_field("name", plugin_.tr("Name"), name_, plugin_.tr("Tap to type"));
+        s.text_field("amount", plugin_.tr("Amount"), amount_, "0", false, "number", 12);
+        s.text_field("secret", plugin_.tr("Password"), secret_, plugin_.tr("Hidden"), true);
+        if (!submitted_.empty()) s.info(plugin_.tr("Submitted"), submitted_);
+        s.note(plugin_.tr("The password field is secure: it always uses the built-in keyboard, "
+                          "so keyboard plugins never see it."));
         return s;
     }
 
+  public:
+    void on_submit(const std::string& id, const std::string& text) {
+        submitted_ = id == "secret" ? plugin_.tr("password ({} characters)", {std::to_string(text.size())}) : text;
+        refresh();
+    }
+
+  private:
     Plugin& plugin_;
     std::string pin_;
+    std::string name_, amount_, secret_, submitted_;
     bool accepted_ = false;
 };
 
@@ -109,6 +131,7 @@ int main() {
     PinPad app(plugin);
     plugin.on_hello = [&](const Json&) { app.refresh(); };
     plugin.on_event = [&](const std::string& id, const Json& v) { app.on_event(id, v); };
+    plugin.on_submit = [&](const std::string& id, const std::string& text) { app.on_submit(id, text); };
     plugin.on_visible = [&](bool) { app.refresh(); };
     plugin.on_locale = [&](const std::string&) { app.refresh(); };
     plugin.on_layout = [&](int) { app.refresh(); };

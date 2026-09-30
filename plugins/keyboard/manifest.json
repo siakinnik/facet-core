@@ -1,0 +1,8 @@
+{
+  "id": "keyboard",
+  "name": { "en": "Keyboard", "ru": "Клавиатура" },
+  "version": "0.1.0",
+  "api": 1,
+  "exec": "keyboard",
+  "capabilities": ["input.keyboard"]
+}

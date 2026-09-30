@@ -477,6 +477,24 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
     } else if (t == "tile") {
         p.tile_subtitle = msg["subtitle"].str();
         changed_ = true;
+    } else if (t == "keyboard_ui" || t == "input") {
+        if (!p.m.can("input.keyboard")) {
+            log::warn("plugins: %s: keyboard message without input.keyboard capability", p.m.id.c_str());
+            return;
+        }
+        if (t == "keyboard_ui") {
+            if (msg["ops"].is_array()) {
+                p.keyboard_ops = msg["ops"];
+                p.keyboard_height = std::clamp(float(msg["height"].as_number(0)), 0.f, 1000.f);
+                changed_ = true;
+            }
+        } else {
+            const std::string& a = msg["action"].str();
+            if (a == "insert" || a == "backspace" || a == "enter" || a == "hide") {
+                input_.push_back({p.m.id, a, msg["text"].str()});
+                changed_ = true;
+            }
+        }
     } else if (t == "display") {
         if (!p.m.can("display.power")) {
             log::warn("plugins: %s: display request without display.power capability", p.m.id.c_str());
@@ -611,13 +629,15 @@ void PluginHost::set_visible(const std::string& id, bool visible) {
     send(*p, msg);
 }
 
-void PluginHost::send_event(const std::string& id, const std::string& widget, const Json& value) {
+void PluginHost::send_event(const std::string& id, const std::string& widget, const Json& value,
+                            const std::string& action) {
     Plugin* p = find(id);
     if (!p || p->state != State::Running) return;
     Json msg = Json::object();
     msg["t"] = "event";
     msg["id"] = widget;
     msg["value"] = value;
+    if (!action.empty()) msg["action"] = action;
     send(*p, msg);
 }
 
@@ -658,6 +678,52 @@ void PluginHost::set_locale(const std::string& lang) {
     msg["value"] = lang;
     for (auto& p : plugins_)
         if (p->state == State::Running) send(*p, msg);
+}
+
+bool PluginHost::keyboard_ready(const std::string& id) const {
+    for (const auto& p : plugins_)
+        if (p->m.id == id)
+            return p->state == State::Running && p->m.can("input.keyboard") && p->keyboard_height > 0;
+    return false;
+}
+
+void PluginHost::keyboard_show(const std::string& id, const std::string& mode, float width,
+                               const std::vector<std::string>& langs) {
+    Plugin* p = find(id);
+    if (!p || p->state != State::Running || !p->m.can("input.keyboard")) return;
+    p->keyboard_ops = Json();
+    p->keyboard_height = 0;
+    Json msg = Json::object();
+    msg["t"] = "keyboard_show";
+    msg["mode"] = mode;
+    msg["width"] = width;
+    Json l = Json::array();
+    for (const auto& s : langs) l.push_back(s);
+    msg["langs"] = l;
+    send(*p, msg);
+}
+
+void PluginHost::keyboard_key(const std::string& id, const std::string& hit) {
+    Plugin* p = find(id);
+    if (!p || p->state != State::Running) return;
+    Json msg = Json::object();
+    msg["t"] = "keyboard_key";
+    msg["hit"] = hit;
+    send(*p, msg);
+}
+
+void PluginHost::keyboard_hide(const std::string& id) {
+    Plugin* p = find(id);
+    if (!p || p->state != State::Running) return;
+    Json msg = Json::object();
+    msg["t"] = "keyboard_hide";
+    send(*p, msg);
+}
+
+std::vector<PluginHost::InputAction> PluginHost::take_input() {
+    std::vector<InputAction> out;
+    out.swap(input_);
+    return out;
 }
 
 std::optional<bool> PluginHost::display_policy() const {

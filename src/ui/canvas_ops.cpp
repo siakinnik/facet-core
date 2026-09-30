@@ -67,17 +67,20 @@ Color color_from(const Theme& theme, std::string_view v, Color fallback) {
 }
 
 std::string draw_canvas(Context& ui, std::string_view id, const Json& node) {
+    float height = std::clamp(float(node["height"].as_number(0)), 0.f, kMaxHeightDp);
+    return draw_ops(ui, id, node["ops"], ui.block(height));
+}
+
+std::string draw_ops(Context& ui, std::string_view id, const Json& ops_json, const Rect& box) {
     const Theme& t = ui.theme();
     gfx::Canvas& cv = ui.canvas();
-    float height = std::clamp(float(node["height"].as_number(0)), 0.f, kMaxHeightDp);
-    Rect box = ui.block(height);
     auto X = [&](const Json& j, const char* k) { return box.x + t.dp(float(j[k].as_number())); };
     auto Y = [&](const Json& j, const char* k) { return box.y + t.dp(float(j[k].as_number())); };
     auto D = [&](const Json& j, const char* k) { return t.dp(float(j[k].as_number())); };
 
     std::string tapped;
     cv.push_clip(box);
-    const auto& ops = node["ops"].items();
+    const auto& ops = ops_json.items();
     for (size_t i = 0; i < ops.size() && i < kMaxOps; ++i) {
         const Json& op = ops[i];
         const std::string& kind = op["op"].str();

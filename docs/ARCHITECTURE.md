@@ -84,9 +84,15 @@ The first directory containing a given plugin id wins.
   translations (`en` is the fallback). `tile.title` defaults to `name`.
 - `capabilities` lists what the plugin may do. The core ignores messages the
   plugin has no right to send (e.g. `display` without `display.power`);
-  `activity` (touch) events go only to plugins with `display.power`.
+  `activity` (touch) events go only to plugins with `display.power`;
+  keyboard messages are accepted only from plugins with `input.keyboard`.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
-  `settings`, `warning`, `plugin`.
+  `settings`, `warning`, `plugin`, `back`, `chevron`, `shift`, `backspace`,
+  `enter`. Plugins without `tile` (e.g. keyboards) get no menu tile.
+
+Bundled plugins live in `plugins/` of the core repository, are part of every
+core release and are installed and updated together with the core. Today this
+is the default keyboard (`plugins/keyboard`).
 
 ### 3.3 States
 
@@ -132,11 +138,14 @@ Core → plugin:
 | `hello` | `api`, `data_dir`, `theme`, `locale`, `timezone`, `content_width` | first message |
 | `ping` | `seq` | watchdog, answer with `pong` |
 | `visible` | `value: bool` | the plugin screen was opened/closed |
-| `event` | `id`, `value` | the user changed a widget |
+| `event` | `id`, `value`, `action?` | the user changed a widget; `action: "submit"` when "Done" was pressed in a text field |
 | `locale` | `value` | UI language changed (`en`, `ru`, …); re-send UI and tile |
 | `timezone` | `value` | time zone changed (IANA id, `""` = system); the SDK applies it to `TZ` |
 | `layout` | `content_width` | width of the content column in dp changed (canvas width); re-send UI |
 | `activity` | — | the screen was touched (`display.power` only) |
+| `keyboard_show` | `mode`, `width`, `langs` | open the keyboard (`input.keyboard` only): field mode `text`/`number`, width in dp, layout languages |
+| `keyboard_key` | `hit` | a key of the keyboard's drawing was tapped |
+| `keyboard_hide` | — | the text field lost focus |
 | `shutdown` | — | exit within 2 s |
 
 Plugin → core:
@@ -148,6 +157,8 @@ Plugin → core:
 | `ui` | `root` | screen tree (3.5) |
 | `tile` | `subtitle` | text under the plugin's menu tile |
 | `display` | `on: bool` | desired screen state (`display.power`) |
+| `keyboard_ui` | `height`, `ops` | the keyboard's drawing: canvas ops, full screen width (`input.keyboard`) |
+| `input` | `action`, `text?` | typed input: `insert` (with `text`), `backspace`, `enter`, `hide` (`input.keyboard`) |
 
 Plugins send already-translated text: they get the language in `hello` and
 `locale`. Unknown fields are ignored, so the protocol grows compatibly.
@@ -165,6 +176,8 @@ Plugins send already-translated text: they get the language in `hello` and
     "min": 1, "max": 30, "step": 1, "unit": "s" },
   { "type": "time",    "id": "night_start", "label": "Night starts", "value": 1380, "step": 15 },
   { "type": "button",  "id": "rescan", "label": "Find cameras again", "style": "normal" },
+  { "type": "text",    "id": "name", "label": "Name", "value": "", "placeholder": "Tap to type",
+    "secure": false, "mode": "text", "max": 256 },
   { "type": "note",    "text": "Small explanatory text" },
   { "type": "canvas",  "id": "pad", "height": 360, "ops": [
     { "op": "rrect", "x": 0, "y": 0, "w": 100, "h": 76, "r": 18,
@@ -210,6 +223,32 @@ C++ plugins use `facet_sdk` (`sdk/`): JSON, the message loop
 (`facet::sdk::Plugin`), the screen builder (`facet::sdk::Screen`), the canvas
 builder (`facet::sdk::Canvas`) and the translation catalog (`plugin.catalog()`,
 `plugin.tr()`).
+
+#### Text input and keyboards
+
+A `text` widget shows a field; tapping it gives it focus and opens the
+on-screen keyboard at the bottom of the screen. The content above shrinks and
+scrolls so the field stays visible. Every change is sent as `event(id, text)`,
+"Done" as `event(id, text, action: "submit")` and closes the keyboard; a tap
+outside the field and the keyboard closes it too. `mode: "number"` opens a
+numeric keypad and accepts digits only.
+
+The keyboard is a plugin (capability `input.keyboard`), chosen in
+Settings → Input → Keyboard; the bundled `keyboard` plugin is the default. The
+core sends it `keyboard_show`, it answers with `keyboard_ui` (canvas ops); key
+taps come back as `keyboard_key` and it replies with `input` actions. Layouts
+(EN/RU letters, symbols, shift, numeric pad) are in the SDK
+(`facet::sdk::Keyboard`), so a keyboard plugin is a few lines of glue.
+
+Security rules, enforced by the core:
+
+- A keyboard plugin never receives the contents of any field; it only learns
+  the keys it draws itself.
+- `secure: true` fields (PINs, passwords) are shown as dots and always use the
+  core's built-in keyboard; keyboard plugins are not involved at all.
+- `input` is accepted only from the keyboard serving the focused field.
+- If the keyboard plugin is missing, disabled or crashed, the built-in
+  keyboard takes over, so text input always works.
 
 ## 4. Screen power
 

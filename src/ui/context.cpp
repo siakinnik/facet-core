@@ -53,6 +53,9 @@ void Context::begin_frame(gfx::Canvas& canvas, const Theme& theme, const Pointer
 
 void Context::end_frame() {
     if (popup_.open) draw_popup();
+    // A press outside the focused field and the keyboard ends text input.
+    if (p_.pressed && focus_.id && !focus_touched_ && !overlay_.contains(p_.x, p_.y) && !blocked_) blur();
+    focus_touched_ = false;
     if (p_.pressed && active_ == 0 && !blocked_) active_ = kBackground;
     if (p_.released) active_ = 0;
 }
@@ -61,6 +64,7 @@ void Context::reset_interaction() {
     active_ = 0;
     drag_ = false;
     popup_.open = false;
+    blur();
 }
 
 bool Context::background_tap() const {
@@ -82,7 +86,9 @@ Color Context::tone_color(Tone tone) const {
 
 Context::Press Context::interact(uint64_t id, const Rect& r) {
     Press out;
-    bool hover = !blocked_ && r.contains(p_.x, p_.y) && canvas_->clip().contains(p_.x, p_.y);
+    bool in_overlay = overlay_.contains(p_.x, p_.y);
+    bool hover = !blocked_ && r.contains(p_.x, p_.y) && canvas_->clip().contains(p_.x, p_.y) &&
+                 in_overlay == in_overlay_;
     if (p_.pressed && hover && active_ == 0) active_ = id;
     if (active_ == id && hover && !drag_) {
         out.held = p_.down;
@@ -198,7 +204,8 @@ HeaderHit Context::begin_screen(std::string_view id, std::string_view title, boo
     text(FontRole::Medium, Theme::kTitle, {x, 0, W - x - gut - touch, hh}, title, c.text);
 
     // Scrolling content.
-    viewport_ = {0, hh, W, H - hh};
+    float bottom = overlay_.empty() ? H : std::min(H, overlay_.y);
+    viewport_ = {0, hh, W, std::max(0.f, bottom - hh)};
     Scroll& s = scroll_[screen_];
     float max_scroll = std::max(0.f, s.content_h - viewport_.h);
     if (!blocked_) {
@@ -488,6 +495,116 @@ bool Context::button(std::string_view id, std::string_view label, ButtonStyle st
     row_highlight(r, pr.held);
     text(FontRole::Medium, Theme::kBody, r, label, style == ButtonStyle::Danger ? c.bad : c.accent, Align::Center);
     return pr.clicked;
+}
+
+// ------------------------------------------------------------------ text input
+
+namespace {
+size_t utf8_length(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s) n += (c & 0xC0) != 0x80;
+    return n;
+}
+void utf8_pop(std::string& s) {
+    while (!s.empty() && (static_cast<unsigned char>(s.back()) & 0xC0) == 0x80) s.pop_back();
+    if (!s.empty()) s.pop_back();
+}
+}  // namespace
+
+void Context::blur() {
+    focus_ = {};
+    edits_.clear();
+    ensure_visible_ = false;
+}
+
+void Context::push_edit(EditKind kind, std::string text) {
+    if (focus_.id) edits_.emplace_back(kind, std::move(text));
+}
+
+Context::TextResult Context::text_field(std::string_view id, std::string_view label, std::string& value,
+                                        const TextOptions& o) {
+    const Theme& t = *theme_;
+    const Palette& c = t.c;
+    uint64_t uid = make_id(id);
+    TextResult res;
+
+    if (focus_.id == uid && !edits_.empty()) {
+        for (auto& [kind, text] : edits_) {
+            if (kind == EditKind::Insert) {
+                if (o.mode == InputMode::Number && text.find_first_not_of("0123456789,.-") != std::string::npos) continue;
+                if (utf8_length(value) + utf8_length(text) > o.max_length) continue;
+                value += text;
+                res.changed = true;
+            } else if (kind == EditKind::Backspace) {
+                if (!value.empty()) utf8_pop(value), res.changed = true;
+            } else {
+                res.submitted = true;
+            }
+        }
+        edits_.clear();
+        if (res.submitted) blur();
+    }
+
+    Rect r = row(Theme::kRow);
+    Press pr = interact(uid, r);
+    if (p_.pressed && active_ == uid) focus_touched_ = true;
+    if (pr.clicked && focus_.id != uid) {
+        focus_ = {uid, o.secure, o.mode};
+        edits_.clear();
+        ensure_visible_ = true;
+        redraw_ = true;
+    }
+    bool focused = focus_.id == uid;
+    row_highlight(r, pr.held);
+
+    Rect in = r.inset(t.dp(18), 0);
+    float label_w = std::min(text_width(FontRole::Regular, Theme::kBody, label), in.w * 0.45f);
+    text(FontRole::Regular, Theme::kBody, in, ellipsize(FontRole::Regular, Theme::kBody, label, label_w + 1),
+         focused ? c.accent : c.text);
+
+    // Value, right-aligned; long values show their end, which is being typed.
+    Rect vbox{in.x + label_w + t.dp(16), in.y, in.w - label_w - t.dp(16), in.h};
+    std::string shown;
+    if (o.secure) {
+        for (size_t i = 0, n = utf8_length(value); i < n; ++i) shown += "•";
+    } else {
+        shown = value;
+    }
+    float caret_w = focused ? t.dp(2) + t.dp(3) : 0;
+    float max_w = vbox.w - caret_w;
+    if (text_width(FontRole::Regular, Theme::kBody, shown) > max_w) {
+        std::string rest = shown;
+        const std::string dots = "…";
+        while (!rest.empty() && text_width(FontRole::Regular, Theme::kBody, dots + rest) > max_w) {
+            size_t cut = 1;  // drop one UTF-8 character from the front
+            while (cut < rest.size() && (static_cast<unsigned char>(rest[cut]) & 0xC0) == 0x80) ++cut;
+            rest.erase(0, cut);
+        }
+        shown = dots + rest;
+    }
+
+    Rect text_box{vbox.x, vbox.y, vbox.w - caret_w, vbox.h};
+    if (value.empty() && !focused)
+        text(FontRole::Regular, Theme::kBody, text_box, ellipsize(FontRole::Regular, Theme::kBody, o.placeholder, max_w),
+             c.text_dim, gfx::Align::End);
+    else
+        text(FontRole::Regular, Theme::kBody, text_box, shown, c.text, gfx::Align::End);
+    if (focused) {
+        float ch = t.dp(26);
+        canvas_->fill_rect({vbox.right() - t.dp(2), r.cy() - ch / 2, t.dp(2), ch}, c.accent);
+        canvas_->fill_rect({in.x, r.bottom() - t.dp(2), in.w, t.dp(2)}, c.accent);
+    }
+
+    // Keep the focused field above the keyboard.
+    if (focused && ensure_visible_ && !overlay_.empty()) {
+        float over = r.bottom() + t.dp(12) - viewport_.bottom();
+        if (over > 0) {
+            scroll_[screen_].offset += over;
+            redraw_ = true;
+        }
+        ensure_visible_ = false;
+    }
+    return res;
 }
 
 // ------------------------------------------------------------------ free layout

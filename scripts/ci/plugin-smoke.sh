@@ -29,7 +29,8 @@ FACET_BACKEND=headless FACET_SIZE=1280x800 FACET_SCALE=1.6667 FACET_SKIP_BOOT_WA
     timeout 60 "$build/facet" 2>&1 | tee "$work/log"
 
 grep -q "example-pinpad ready" "$work/log" || { echo "plugin did not start" >&2; exit 1; }
-if grep -qE "example-pinpad crashed|failed permanently" "$work/log"; then
+grep -q "plugins: keyboard ready" "$work/log" || { echo "bundled keyboard plugin did not start" >&2; exit 1; }
+if grep -qE "crashed|failed permanently" "$work/log"; then
     echo "plugin crashed" >&2
     exit 1
 fi

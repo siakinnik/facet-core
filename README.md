@@ -11,6 +11,8 @@ takes the panel down.
   brightness, language, plugins).
 - Dark and light themes, automatic day/night switching, English and Russian UI,
   per-panel time zone (without touching the system zone).
+- On-screen keyboard as a replaceable plugin (EN/RU, symbols, numeric pad);
+  secure fields (PINs, passwords) always use the core's built-in keyboard.
 - Status bar with the network state (Wi-Fi with signal and SSID via nl80211,
   Ethernet, offline), read without root.
 - Every build knows what it is: version, `dev`/`release` channel, git commit
@@ -209,6 +211,8 @@ src/gfx/        canvas, anti-aliased rasterizer, TrueType, UTF-8
 src/ui/         themes, ui::Context (the single UI API), icons
 src/platform/   fbdev + evdev, x11, headless, backlight
 src/plugins/    plugin host: discovery, IPC, watchdog, restarts
+plugins/        bundled plugins, shipped with the core (default keyboard)
+examples/       example plugins (PIN pad + text fields: canvas and input demo)
 src/i18n/       translations of the core UI
 src/app/        main loop and screens
 deploy/         systemd unit template and environment file

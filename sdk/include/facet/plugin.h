@@ -64,6 +64,12 @@ public:
     Screen& button(std::string id, std::string label, std::string style = "normal");
     // Free drawing area, full content width, `height` dp tall.
     Screen& canvas(std::string id, float height, const Canvas& canvas);
+    // Text input. Tapping it opens the on-screen keyboard; every change is
+    // sent as event(id, text), "Done" as submit(id, text). mode: "text" or
+    // "number". `secure` masks the value and always uses the core's built-in
+    // keyboard, so keyboard plugins never see what is typed (PINs, passwords).
+    Screen& text_field(std::string id, std::string label, std::string value, std::string placeholder = {},
+                       bool secure = false, std::string mode = "text", int max_length = 256);
 
     const Json& json() const { return root_; }
 
@@ -79,6 +85,16 @@ public:
     // Callbacks. All run on the thread that called run().
     std::function<void(const Json& hello)> on_hello;
     std::function<void(const std::string& id, const Json& value)> on_event;
+    // "Done" pressed in a text field (the value is the final text).
+    std::function<void(const std::string& id, const std::string& text)> on_submit;
+
+    // ---- Keyboard plugins only (capability "input.keyboard").
+    // The core asks for a keyboard: field mode ("text"/"number"), width in dp
+    // and layout languages. Answer with keyboard_ui().
+    std::function<void(const std::string& mode, float width, const std::vector<std::string>& langs)>
+        on_keyboard_show;
+    std::function<void(const std::string& hit)> on_keyboard_key;  // a key (hit id) was tapped
+    std::function<void()> on_keyboard_hide;
     std::function<void(bool visible)> on_visible;
     // Called after the UI language changed (catalog already switched).
     std::function<void(const std::string& lang)> on_locale;
@@ -103,6 +119,9 @@ public:
     void set_ui(const Screen& screen);
     void set_tile(const std::string& subtitle);
     void request_display(bool on);
+    // Keyboard plugins: current keyboard drawing and typed actions.
+    void keyboard_ui(float height, const Canvas& canvas);
+    void input(const std::string& action, const std::string& text = {});  // insert|backspace|enter|hide
     void send(const Json& msg);
 
     // Runs until the core sends shutdown or closes stdin. Returns exit code.

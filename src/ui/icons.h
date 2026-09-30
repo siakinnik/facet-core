@@ -7,7 +7,7 @@
 
 namespace facet::ui {
 
-enum class Icon { None, Clock, Display, Camera, Settings, Back, Plugin, Warning, Chevron };
+enum class Icon { None, Clock, Display, Camera, Settings, Back, Plugin, Warning, Chevron, Shift, Backspace, Enter };
 
 Icon icon_from_name(std::string_view name);
 void draw_icon(gfx::Canvas& c, Icon icon, const gfx::Rect& box, gfx::Color color);

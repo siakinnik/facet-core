@@ -148,11 +148,19 @@ build_core() {
         [[ -n "$suffix" ]] && version="$version-$suffix"
         mkdir -p "$BUILD/generated"
         gen_build_info "$version" "$BUILD/generated/build_info_gen.h"
-        local sources=("$CORE"/sdk/src/*.cpp)
+        local sources=("$CORE"/sdk/src/*.cpp "$CORE"/sdk/src/i18n/*.cpp)
         while IFS= read -r f; do sources+=("$f"); done < <(find "$CORE/src" -name '*.cpp' ! -name x11.cpp | sort)
-        "$CXX" -std=c++20 -O2 -Wall -Wextra -I"$CORE/src" -I"$CORE/sdk/include" -I"$BUILD/generated" \
+        "$CXX" -std=c++20 -O2 -Wall -Wextra -I"$CORE/src" -I"$CORE/sdk/include" -I"$CORE/sdk/src" -I"$BUILD/generated" \
             "${sources[@]}" -lpthread -o "$BUILD/facet"
     fi
+}
+
+compile_plugin() {  # compile_plugin <plugin dir> <output binary>
+    local dir="$1" bin="$2" src="$1"
+    [[ -d "$dir/src" ]] && src="$dir/src"
+    local sources=("$CORE"/sdk/src/*.cpp "$CORE"/sdk/src/i18n/*.cpp)
+    while IFS= read -r f; do sources+=("$f"); done < <(find "$src" -name '*.cpp' ! -path '*/build*' ! -path '*/tests/*' ! -path '*/tools/*' | sort)
+    "$CXX" -std=c++17 -O2 -I"$src" -I"$CORE/sdk/include" -I"$CORE/sdk/src" "${sources[@]}" -lpthread -o "$bin" >&2
 }
 
 # Builds one plugin and prints the path of its executable.
@@ -164,11 +172,10 @@ build_plugin() {
         cmake --build "$out" -j "$JOBS" --target "$exec_name" >&2
         find "$out" -type f -name "$exec_name" -perm -u+x | head -n1
     else
-        # Convention for CMake-less builds: every .cpp under src/ plus the SDK.
+        # Convention for CMake-less builds: every .cpp under src/ (or the plugin
+        # directory itself when there is no src/) plus the SDK.
         mkdir -p "$out"
-        local sources=("$CORE"/sdk/src/*.cpp)
-        while IFS= read -r f; do sources+=("$f"); done < <(find "$dir/src" -name '*.cpp' | sort)
-        "$CXX" -std=c++17 -O2 -I"$dir/src" -I"$CORE/sdk/include" "${sources[@]}" -lpthread -o "$out/$exec_name" >&2
+        compile_plugin "$dir" "$out/$exec_name"
         echo "$out/$exec_name"
     fi
 }
@@ -177,6 +184,23 @@ build_core
 
 declare -A PLUGIN_BIN=()
 declare -A PLUGIN_SRC=()
+
+# Bundled plugins (e.g. the default keyboard) ship with the core.
+for manifest in "$CORE"/plugins/*/manifest.json; do
+    [[ -f "$manifest" ]] || continue
+    dir="$(dirname "$manifest")"
+    id="$(json_field "$manifest" id)"
+    exec_name="$(json_field "$manifest" exec)"
+    bin="$BUILD/plugins/$(basename "$dir")/$exec_name"
+    if [[ $USE_CMAKE == 0 ]]; then
+        say "Building bundled plugin $id"
+        mkdir -p "$(dirname "$bin")"
+        compile_plugin "$dir" "$bin"
+    fi
+    [[ -x "$bin" ]] || die "bundled plugin $id was not built ($bin)"
+    PLUGIN_BIN[$id]="$bin"
+    PLUGIN_SRC[$id]="$dir"
+done
 for dir in "${PLUGINS[@]}"; do
     [[ -f "$dir/manifest.json" ]] || die "$dir has no manifest.json"
     id="$(json_field "$dir/manifest.json" id)"

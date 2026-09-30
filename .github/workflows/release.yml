@@ -100,7 +100,7 @@ jobs:
         run: bash scripts/ci/smoke.sh build/facet
 
       - name: Package
-        run: bash scripts/ci/package.sh build/facet "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" dist
+        run: bash scripts/ci/package.sh build "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" dist
 
       - uses: actions/upload-artifact@v4
         with:

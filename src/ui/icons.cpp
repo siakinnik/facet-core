@@ -18,6 +18,9 @@ Icon icon_from_name(std::string_view name) {
     if (name == "warning") return Icon::Warning;
     if (name == "back") return Icon::Back;
     if (name == "chevron") return Icon::Chevron;
+    if (name == "shift") return Icon::Shift;
+    if (name == "backspace") return Icon::Backspace;
+    if (name == "enter") return Icon::Enter;
     return Icon::Plugin;
 }
 
@@ -86,6 +89,29 @@ void draw_icon(gfx::Canvas& c, Icon icon, const Rect& box, gfx::Color color) {
             p.polygon(hole, 3);  // opposite winding -> hole
             p.stroke_line(P(12, 10.5f), P(12, 14), stroke * 0.9f);
             p.circle(ox + 12 * s, oy + 16.6f * s, 1.1f * s);
+            break;
+        }
+        case Icon::Shift: {  // outlined up arrow
+            Point outer[7] = {P(12, 3), P(21, 12), P(16, 12), P(16, 20), P(8, 20), P(8, 12), P(3, 12)};
+            p.polygon(outer, 7);
+            Point inner[7] = {P(12, 6), P(6.5f, 10.5f), P(10, 10.5f), P(10, 18), P(14, 18), P(14, 10.5f), P(17.5f, 10.5f)};
+            p.polygon(inner, 7);  // opposite winding -> hole
+            break;
+        }
+        case Icon::Backspace: {  // tag pointing left with an x
+            Point outer[5] = {P(8, 5), P(22, 5), P(22, 19), P(8, 19), P(1.5f, 12)};
+            p.polygon(outer, 5);
+            Point inner[5] = {P(8.9f, 7), P(4.2f, 12), P(8.9f, 17), P(20, 17), P(20, 7)};
+            p.polygon(inner, 5);
+            p.stroke_line(P(11.5f, 9), P(17, 15), stroke * 0.9f);
+            p.stroke_line(P(17, 9), P(11.5f, 15), stroke * 0.9f);
+            break;
+        }
+        case Icon::Enter: {  // return arrow
+            p.stroke_line(P(19, 5), P(19, 14), stroke);
+            p.stroke_line(P(19, 14), P(6, 14), stroke);
+            p.stroke_line(P(6, 14), P(10, 10), stroke);
+            p.stroke_line(P(6, 14), P(10, 18), stroke);
             break;
         }
         case Icon::Plugin: {

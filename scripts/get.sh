@@ -171,6 +171,16 @@ install -Dm755 "$PKG/bin/facet" "$PREFIX/bin/facet"
 install -Dm644 "$PKG/share/facet/facet.env" "$PREFIX/share/facet/facet.env"
 install -Dm644 "$PKG/share/facet/facet.service.in" "$PREFIX/share/facet/facet.service.in"
 mkdir -p "$PLUGIN_ROOT"
+# Bundled plugins (the default keyboard, ...) are updated together with the core.
+for dir in "$PKG"/lib/facet/plugins/*/; do
+    [[ -f "$dir/manifest.json" ]] || continue
+    bundled="$(basename "$dir")"
+    rm -rf "${PLUGIN_ROOT:?}/.$bundled.new"
+    cp -r "$dir" "$PLUGIN_ROOT/.$bundled.new"
+    rm -rf "${PLUGIN_ROOT:?}/$bundled"
+    mv "$PLUGIN_ROOT/.$bundled.new" "$PLUGIN_ROOT/$bundled"
+    echo "  bundled plugin $bundled"
+done
 
 if ! { find /usr/share/fonts /usr/local/share/fonts 2>/dev/null || true; } |
         grep -qE '/(OpenSans-Regular|NotoSans-Regular|Ubuntu-R|DejaVuSans|LiberationSans-Regular)\.ttf$'; then

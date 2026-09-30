@@ -111,6 +111,13 @@ const i18n::Table& ru() {
         {"dev", "dev (разработка)"},
         {"release", "релиз"},
 
+        // Input
+        {"Input", "Ввод"},
+        {"Keyboard", "Клавиатура"},
+        {"Built-in", "Встроенная"},
+        {"Done", "Готово"},
+        {"space", "пробел"},
+
         // Plugin screen
         {"Status", "Состояние"},
         {"Plugin", "Плагин"},

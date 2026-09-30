@@ -9,6 +9,7 @@
 
 #include "core/config.h"
 #include "core/netstatus.h"
+#include "facet/keyboard.h"
 #include "gfx/canvas.h"
 #include "platform/platform.h"
 #include "plugins/plugin_host.h"
@@ -46,6 +47,14 @@ private:
     void draw_status_bar(float right, float cy);
     void draw_build_line(float y);
     void draw_plugin(double t);
+
+    // On-screen keyboard (keyboard.cpp).
+    void draw_keyboard();
+    void close_keyboard();
+    void apply_key(const std::string& action, const std::string& text);
+    void take_plugin_input();
+    std::string keyboard_plugin() const;  // selected, running keyboard plugin or "" (built-in)
+    std::vector<std::string> keyboard_langs() const;
     void render_plugin_ui(plugins::Plugin& p);
 
     std::unique_ptr<platform::Platform> platform_;
@@ -82,6 +91,16 @@ private:
     std::string ip_cache_;
     // Region picked in Settings while its city is not chosen yet.
     std::optional<std::string> tz_region_pending_;
+
+    // Keyboard session: which field it serves and who draws it ("" = built-in).
+    struct KeyboardState {
+        bool visible = false;
+        uint64_t field = 0;
+        std::string plugin;
+    } kb_;
+    gfx::Rect kb_rect_;
+    sdk::Keyboard builtin_kb_;  // also the fallback when the plugin is missing
+    std::vector<std::pair<std::string, std::string>> kb_pending_;  // built-in keys, applied after the frame
 };
 
 }  // namespace facet
