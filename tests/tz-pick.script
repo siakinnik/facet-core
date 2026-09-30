@@ -1,0 +1,21 @@
+# Headless: pick Asia -> first city; local time must change.
+wait 3
+tap 1210 110
+wait 0.5
+tap 640 660
+wait 0.5
+down 640 650
+move 640 550
+move 640 450
+move 640 350
+up 640 350
+wait 0.5
+tap 640 463
+wait 0.5
+tap 640 766
+wait 0.5
+shot shots/53-cities.ppm
+tap 640 230
+wait 0.5
+shot shots/54-picked.ppm
+quit

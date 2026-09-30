@@ -1,0 +1,14 @@
+# Headless: status bar + build line on the menu, network/build rows in settings.
+wait 3
+shot shots/60-splash-or-menu.ppm
+wait 1
+shot shots/61-menu.ppm
+tap 1210 110
+wait 0.5
+down 640 700
+move 640 500
+move 640 300
+up 640 300
+wait 1.5
+shot shots/62-settings-bottom.ppm
+quit

@@ -1,0 +1,20 @@
+# Headless smoke run: splash -> menu -> settings -> theme popup -> dashboard.
+wait 0.3
+shot shots/01-splash.ppm
+wait 2.5
+shot shots/02-menu.ppm
+tap 1210 110
+wait 0.3
+shot shots/03-settings.ppm
+tap 640 140
+wait 0.3
+shot shots/04-theme-popup.ppm
+tap 640 460
+wait 0.3
+shot shots/05-light.ppm
+tap 60 60
+wait 0.3
+tap 200 400
+wait 0.3
+shot shots/06-dashboard.ppm
+quit

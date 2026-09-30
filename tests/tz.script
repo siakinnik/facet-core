@@ -1,0 +1,16 @@
+# Headless: open the time zone picker and scroll the region list.
+wait 3
+tap 1210 110
+wait 0.5
+shot shots/50-settings.ppm
+tap 640 660
+wait 0.5
+shot shots/51-regions.ppm
+down 640 650
+move 640 550
+move 640 450
+move 640 350
+up 640 350
+wait 0.5
+shot shots/52-regions-scrolled.ppm
+quit

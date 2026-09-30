@@ -1,0 +1,18 @@
+wait 2
+tap 943 446
+wait 1
+down 640 700
+move 640 400
+move 640 150
+up 640 150
+wait 1
+tap 640 175
+wait 0.5
+shot shots/20-popup.ppm
+tap 640 550
+wait 0.5
+shot shots/21-after-select.ppm
+wait 1
+tap 640 400
+wait 2
+quit

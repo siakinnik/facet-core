@@ -1,0 +1,12 @@
+# Headless: switch language at runtime; the plugin must re-render too.
+wait 3
+tap 1210 110
+wait 0.5
+tap 640 450
+wait 0.5
+tap 640 390
+wait 1
+tap 60 60
+wait 1.5
+shot shots/40-menu-after-switch.ppm
+quit

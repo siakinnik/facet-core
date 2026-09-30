@@ -1,0 +1,27 @@
+# Facet panel. Starts as early as possible: right after local filesystems
+# are mounted (fonts, /var/lib/facet), before the login prompt on tty1.
+# Installed by scripts/install.sh or `cmake --install`; @FACET_BIN@ is the
+# installed binary.
+[Unit]
+Description=Facet touch panel
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Wants=systemd-udevd.service
+Before=getty@tty1.service sysinit.target
+Conflicts=getty@tty1.service shutdown.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/facet/facet.env
+ExecStart=@FACET_BIN@
+Restart=always
+RestartSec=1
+# Plugins are children of this unit; stop them together.
+KillMode=control-group
+TTYPath=/dev/tty1
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

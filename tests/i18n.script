@@ -1,0 +1,12 @@
+# Headless: menu and plugin screen in the configured language.
+wait 3
+shot shots/30-menu.ppm
+tap 943 446
+wait 1.5
+shot shots/31-plugin.ppm
+tap 60 60
+wait 0.5
+tap 1210 110
+wait 0.5
+shot shots/32-settings.ppm
+quit

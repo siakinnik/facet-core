@@ -1,0 +1,17 @@
+wait 3
+shot shots/10-menu.ppm
+tap 943 446
+wait 1
+shot shots/11-plugin.ppm
+down 640 700
+move 640 600
+move 640 400
+move 640 200
+up 640 150
+wait 1
+shot shots/12-plugin-scrolled.ppm
+wait 3
+shot shots/13-after-crash.ppm
+wait 3
+shot shots/14-restarted.ppm
+quit
