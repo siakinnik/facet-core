@@ -9,6 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(FACET_WITH_X11 "Build the X11 development backend if libX11 is available" ON)
+option(FACET_STATIC "Link fully static (portable release binaries)" OFF)
 
 add_subdirectory(sdk)
 
@@ -53,8 +54,11 @@ add_dependencies(facet facet_build_info)
 target_include_directories(facet PRIVATE ${FACET_GENERATED})
 target_compile_options(facet PRIVATE -Wall -Wextra)
 target_link_libraries(facet PRIVATE facet_sdk pthread)
+if(FACET_STATIC)
+    target_link_options(facet PRIVATE -static -s)  # stripped: release binaries
+endif()
 
-if(FACET_WITH_X11)
+if(FACET_WITH_X11 AND NOT FACET_STATIC)  # no static libX11; release binaries are fbdev-only
     find_package(X11)
     if(X11_FOUND)
         target_sources(facet PRIVATE src/platform/x11.cpp)
