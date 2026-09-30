@@ -93,6 +93,9 @@ GENERATOR=()
 have ninja && GENERATOR=(-G Ninja)
 
 # Plugins: explicit arguments, else every sibling facet-* project with a manifest.
+# Explicit plugins must build; found ones are skipped with a warning if they
+# do not (e.g. facet-telegram without TDLib installed).
+EXPLICIT_PLUGINS=$(( ${#PLUGINS[@]} > 0 ))
 if [[ ${#PLUGINS[@]} -eq 0 ]]; then
     for d in "$CORE"/../facet-*/; do
         [[ -f "$d/manifest.json" ]] || continue  # also skips the unexpanded pattern
@@ -207,8 +210,11 @@ for dir in "${PLUGINS[@]}"; do
     exec_name="$(json_field "$dir/manifest.json" exec)"
     [[ -n "$id" && -n "$exec_name" ]] || die "$dir/manifest.json needs \"id\" and \"exec\""
     say "Building plugin $id"
-    bin="$(build_plugin "$dir" "$exec_name")"
-    [[ -x "$bin" ]] || die "plugin $id: built executable '$exec_name' not found"
+    if ! bin="$(build_plugin "$dir" "$exec_name")" || [[ ! -x "$bin" ]]; then
+        [[ $EXPLICIT_PLUGINS == 1 ]] && die "plugin $id did not build (executable '$exec_name' not found)"
+        warn "plugin $id did not build, skipped (see its README for build requirements)"
+        continue
+    fi
     PLUGIN_BIN[$id]="$bin"
     PLUGIN_SRC[$id]="$dir"
 done

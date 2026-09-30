@@ -21,6 +21,9 @@ Icon icon_from_name(std::string_view name) {
     if (name == "shift") return Icon::Shift;
     if (name == "backspace") return Icon::Backspace;
     if (name == "enter") return Icon::Enter;
+    if (name == "gauge") return Icon::Gauge;
+    if (name == "chat") return Icon::Chat;
+    if (name == "bell") return Icon::Bell;
     return Icon::Plugin;
 }
 
@@ -112,6 +115,44 @@ void draw_icon(gfx::Canvas& c, Icon icon, const Rect& box, gfx::Color color) {
             p.stroke_line(P(19, 14), P(6, 14), stroke);
             p.stroke_line(P(6, 14), P(10, 10), stroke);
             p.stroke_line(P(6, 14), P(10, 18), stroke);
+            break;
+        }
+        case Icon::Gauge: {  // speedometer: open arc, ticks and a needle
+            const float pi = 3.14159265f;
+            float cx = ox + 12 * s, cy = oy + 14 * s;
+            std::vector<Point> band;
+            const int n = 32;
+            float a0 = pi * 0.8f, a1 = pi * 2.2f, r = 9.f * s;
+            for (int i = 0; i <= n; ++i) {
+                float a = a0 + (a1 - a0) * float(i) / n;
+                band.push_back({cx + std::cos(a) * (r + stroke / 2), cy + std::sin(a) * (r + stroke / 2)});
+            }
+            for (int i = n; i >= 0; --i) {
+                float a = a0 + (a1 - a0) * float(i) / n;
+                band.push_back({cx + std::cos(a) * (r - stroke / 2), cy + std::sin(a) * (r - stroke / 2)});
+            }
+            p.polygon(band.data(), int(band.size()));
+            p.stroke_line({cx, cy}, P(16.5f, 9), stroke);
+            p.circle(cx, cy, 2.f * s);
+            break;
+        }
+        case Icon::Chat: {  // speech bubble with three dots
+            Rect r{ox + 2 * s, oy + 3.5f * s, 20 * s, 14 * s};
+            p.round_rect(r, 4 * s);
+            p.round_rect(r.inset(stroke), 2.5f * s, true);
+            Point tail[3] = {P(6, 16.5f), P(11, 16.5f), P(5.5f, 21.5f)};
+            p.polygon(tail, 3);
+            for (int i = 0; i < 3; ++i) p.circle(ox + (7.5f + 4.5f * float(i)) * s, oy + 10.5f * s, 1.3f * s);
+            break;
+        }
+        case Icon::Bell: {
+            Point body[8] = {P(12, 3), P(16.5f, 5.5f), P(17.5f, 11), P(18.5f, 15), P(21, 18), P(3, 18), P(5.5f, 15),
+                             P(6.5f, 11)};
+            p.polygon(body, 8);
+            Point hole[8] = {P(12, 5.2f), P(8.4f, 11.2f), P(7.6f, 15.4f), P(6.3f, 16.2f), P(17.7f, 16.2f),
+                             P(16.4f, 15.4f), P(15.6f, 11.2f), P(14.9f, 6.9f)};
+            p.polygon(hole, 8);  // opposite winding -> hole
+            p.circle(ox + 12 * s, oy + 20.5f * s, 2.f * s);
             break;
         }
         case Icon::Plugin: {

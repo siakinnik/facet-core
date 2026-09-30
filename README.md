@@ -58,6 +58,16 @@ screen/camera plugin:
 curl -fsSL https://raw.githubusercontent.com/siakinnik/facet-core/main/scripts/get.sh | sudo bash -s -- --plugin siakinnik/facet-display-power
 ```
 
+<!--
+Available plugins:
+
+| Repository | What it does |
+|---|---|
+| [facet-display-power](https://github.com/siakinnik/facet-display-power) | screen on/off by schedule, touch and camera presence |
+| [facet-sysmon](https://github.com/siakinnik/facet-sysmon) | CPU, memory, temperatures, disks, network, top processes |
+| [facet-telegram](https://github.com/siakinnik/facet-telegram) | unread messages from private Telegram chats (read only) |
+-->
+
 `--remove-plugin <id>` removes one. A plugin release is an archive named
 `<repo>-<version>-linux-<arch>.tar.gz` whose top directory holds
 `manifest.json` and the executable.

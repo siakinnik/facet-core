@@ -88,7 +88,8 @@ The first directory containing a given plugin id wins.
   keyboard messages are accepted only from plugins with `input.keyboard`.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
   `settings`, `warning`, `plugin`, `back`, `chevron`, `shift`, `backspace`,
-  `enter`. Plugins without `tile` (e.g. keyboards) get no menu tile.
+  `enter`, `gauge`, `chat`, `bell`. Unknown names show the generic plugin icon,
+  so a plugin may use icons of newer cores. Plugins without `tile` (e.g. keyboards) get no menu tile.
 
 Bundled plugins live in `plugins/` of the core repository, are part of every
 core release and are installed and updated together with the core. Today this
@@ -196,7 +197,7 @@ set equals the `ui::Context` API, so built-in screens and plugins look alike.
 #### Canvas: custom drawing
 
 `canvas` lets a plugin draw its own UI (PIN pads, gauges, keyboards) while
-the core still does all rendering. It spans the content column
+the core still does all rendering. Cores ignore ops they do not know. It spans the content column
 (`content_width` dp, from `hello` and `layout`) and is `height` dp tall; ops
 use dp relative to its top-left corner and are clipped to it.
 
@@ -207,6 +208,9 @@ use dp relative to its top-left corner and are clipped to it.
 | `circle` | `cx`, `cy`, `r`, `color` |
 | `ring` | `cx`, `cy`, `r`, `width`, `color` |
 | `line` | `x1`, `y1`, `x2`, `y2`, `width`, `color` |
+| `arc` | `cx`, `cy`, `r`, `width`, `start`, `sweep` (degrees, 0 = 12 o'clock, clockwise), `color` |
+| `poly` | `pts` (`[x0, y0, x1, y1, …]`, filled), `color` |
+| `polyline` | `pts`, `width`, `color` |
 | `text` | `x`, `y`, `w`, `h`, `text`, `size`, `color`, `align` (`start`/`center`/`end`), `font` (`regular`/`medium`/`light`) |
 | `icon` | `x`, `y`, `size`, `name`, `color` |
 

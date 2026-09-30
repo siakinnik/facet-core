@@ -33,6 +33,13 @@ public:
     Canvas& circle(float cx, float cy, float r, std::string color, std::string hit = {}, std::string pressed = {});
     Canvas& ring(float cx, float cy, float r, float width, std::string color);
     Canvas& line(float x1, float y1, float x2, float y2, float width, std::string color);
+    // Part of a ring with round ends: angles in degrees, 0 = 12 o'clock,
+    // clockwise (gauges, progress).
+    Canvas& arc(float cx, float cy, float r, float width, float start, float sweep, std::string color);
+    // Filled polygon and a stroked open line through points {x0, y0, x1, y1, ...}
+    // (charts). At most 1024 points each.
+    Canvas& poly(std::vector<float> points, std::string color);
+    Canvas& polyline(std::vector<float> points, float width, std::string color);
     // Text vertically centred in the box; align: "start", "center", "end";
     // font: "regular", "medium", "light". Too long text is ellipsized.
     Canvas& text(float x, float y, float w, float h, std::string text, float size, std::string color,

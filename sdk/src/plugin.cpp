@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -185,6 +186,36 @@ Canvas& Canvas::ring(float cx, float cy, float r, float width, std::string color
 Canvas& Canvas::line(float x1, float y1, float x2, float y2, float width, std::string color) {
     Json& j = add("line");
     j["x1"] = x1, j["y1"] = y1, j["x2"] = x2, j["y2"] = y2, j["width"] = width;
+    j["color"] = std::move(color);
+    return *this;
+}
+
+Canvas& Canvas::arc(float cx, float cy, float r, float width, float start, float sweep, std::string color) {
+    Json& j = add("arc");
+    j["cx"] = cx, j["cy"] = cy, j["r"] = r, j["width"] = width, j["start"] = start, j["sweep"] = sweep;
+    j["color"] = std::move(color);
+    return *this;
+}
+
+namespace {
+Json points_json(const std::vector<float>& points) {
+    Json pts = Json::array();
+    for (float v : points) pts.push_back(Json(std::round(v * 10) / 10));  // 0.1 dp is plenty
+    return pts;
+}
+}  // namespace
+
+Canvas& Canvas::poly(std::vector<float> points, std::string color) {
+    Json& j = add("poly");
+    j["pts"] = points_json(points);
+    j["color"] = std::move(color);
+    return *this;
+}
+
+Canvas& Canvas::polyline(std::vector<float> points, float width, std::string color) {
+    Json& j = add("polyline");
+    j["pts"] = points_json(points);
+    j["width"] = width;
     j["color"] = std::move(color);
     return *this;
 }
