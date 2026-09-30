@@ -200,9 +200,12 @@ int App::run() {
         double next = std::min(host_.next_deadline(t), t + 1.0);
         std::tm tm = local_now();
         next = std::min(next, t + (60 - tm.tm_sec) + 0.05);  // minute boundary for the clock
-        bool animating = ui_.wants_redraw() || (view_ == View::Splash);
+        // A dark screen draws nothing: pending redraws wait for it to wake up
+        // (waking marks the frame dirty anyway), otherwise poll() would spin.
+        bool animating = display_on_ && (ui_.wants_redraw() || view_ == View::Splash);
         if (animating) next = std::min(next, t + 1.0 / 60);
-        int timeout = dirty_ ? 0 : std::max(0, int(std::ceil((next - t) * 1000)));
+        bool redraw_now = dirty_ && display_on_;
+        int timeout = redraw_now ? 0 : std::max(0, int(std::ceil((next - t) * 1000)));
 
         fds.clear();
         platform_->add_poll_fds(fds);
