@@ -23,22 +23,46 @@ Status: **alpha** (0.0.1-alpha).
 
 ## Install on a device
 
-Requirements: Linux with a framebuffer (`/dev/fb0`), a C++20 compiler
-(GCC 10+ or Clang 12+) and a TrueType font. CMake is optional.
+Prebuilt static binaries for **x86_64**, **aarch64** (64-bit Raspberry Pi OS)
+and **armv7** (32-bit Raspberry Pi OS) are published on the
+[Releases](https://github.com/siakinnik/facet-core/releases) page. Nothing to
+compile; the device only needs Linux with a framebuffer (`/dev/fb0`) and a
+TrueType font.
 
 ```bash
-# Debian/Ubuntu example; see "Dependencies" for other distributions
-sudo apt install g++ cmake fonts-dejavu-core
+sudo apt install fonts-dejavu-core   # any supported font, see "Dependencies"
+curl -fsSL https://raw.githubusercontent.com/siakinnik/facet-core/main/scripts/get.sh | sudo bash
+```
 
-git clone <facet-core repo> facet-core
-git clone <plugin repo> facet-display-power   # optional: plugins next to the core are picked up
+`get.sh` picks the newest release for the device's architecture, verifies its
+checksum, installs `/usr/local/bin/facet` and enables `facet.service`, which
+starts right after local filesystems are mounted and takes over tty1.
+
+| Command (append to `… \| sudo bash -s --`) | What it does |
+|---|---|
+| *(nothing)* | install or update to the newest release and start |
+| `--version v0.0.1-alpha` | install a specific release |
+| `--no-start` | install and enable, start on next boot |
+| `--uninstall` | remove binary and service (keeps settings and data) |
+
+Logs: `journalctl -u facet -f`. Update: run the same command again.
+Offline: download the archive from Releases and run
+`sudo scripts/get.sh --file facet-<version>-linux-<arch>.tar.gz`.
+
+## Build from source
+
+For development or unsupported architectures. Needs a C++20 compiler
+(GCC 10+ or Clang 12+); CMake is optional.
+
+```bash
+sudo apt install g++ cmake fonts-dejavu-core
+git clone https://github.com/siakinnik/facet-core.git
 cd facet-core
 sudo scripts/install.sh
 ```
 
 This builds the core and every sibling `facet-*` plugin, installs them under
-`/usr/local`, and enables `facet.service`, which starts right after local
-filesystems are mounted and takes over tty1.
+`/usr/local` and enables `facet.service`.
 
 | Command | What it does |
 |---|---|
@@ -129,6 +153,19 @@ scripts/check_i18n.py     # fails on non-English text outside i18n/ directories
 
 In the X11 window the mouse acts as a finger and `q` quits. The headless
 backend replays `FACET_SCRIPT` (`tap x y`, `wait s`, `shot file.ppm`, ...).
+
+### Releases (GitHub Actions)
+
+- **CI** (`.github/workflows/ci.yml`) runs on every push and pull request:
+  translation check, builds (with the X11 dev window and static), headless
+  smoke test.
+- **Release** (`.github/workflows/release.yml`): bump the version in
+  `CMakeLists.txt` (`project(VERSION)` and `FACET_VERSION_SUFFIX`), push, then
+  Actions → Release → *Run workflow*. It tags `v<version>`, builds static
+  binaries for x86_64, aarch64 and armv7 (ARM builds are smoke-tested under
+  QEMU), and publishes a release with the archives and `SHA256SUMS`. Versions
+  with a suffix (`-alpha`, `-beta`) are marked as pre-releases. Pushing a
+  `v<version>` tag by hand triggers the same build.
 
 ### Build info
 
