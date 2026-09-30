@@ -111,8 +111,8 @@ case "$(uname -m)" in
     *) die "no prebuilt binary for $(uname -m); build from source" ;;
 esac
 
-# Release archives are named <repo name>-<version>-linux-<arch>.tar.gz.
-download() {  # download <owner/repo> -> path of the archive
+# Release archives: <prefix>-<version>-linux-<arch>.tar.gz (core: "facet", plugins: repo name).
+download() {  # download <owner/repo> <archive prefix> -> path of the archive
     local repo="$1" tag="$TAG" name base
     if [[ -z "$tag" ]]; then
         # Newest release including pre-releases (/releases/latest skips those).
@@ -121,7 +121,7 @@ download() {  # download <owner/repo> -> path of the archive
         tag="$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$WORK/releases.json" | head -n1)"
         [[ -n "$tag" ]] || die "no releases found in $repo"
     fi
-    name="${repo##*/}-${tag#v}-linux-$ARCH.tar.gz"
+    name="$2-${tag#v}-linux-$ARCH.tar.gz"
     base="https://github.com/$repo/releases/download/$tag"
     say "Downloading $repo $tag for $ARCH" >&2
     fetch "$base/$name" "$WORK/$name" || die "cannot download $base/$name"
@@ -135,7 +135,7 @@ download() {  # download <owner/repo> -> path of the archive
 
 # ---------------------------------------------------------------- plugin
 if [[ -n "$PLUGIN" ]]; then
-    [[ -n "$FILE" ]] || FILE="$(download "$PLUGIN")"
+    [[ -n "$FILE" ]] || FILE="$(download "$PLUGIN" "${PLUGIN##*/}")"  # plugin archives: <repo>-...
     mkdir -p "$WORK/pkg"
     tar -C "$WORK/pkg" -xzf "$FILE"
     manifest="$(find "$WORK/pkg" -mindepth 2 -maxdepth 2 -name manifest.json | head -n1)"
@@ -158,7 +158,7 @@ if [[ -n "$PLUGIN" ]]; then
 fi
 
 # ---------------------------------------------------------------- core
-[[ -n "$FILE" ]] || FILE="$(download "$REPO")"
+[[ -n "$FILE" ]] || FILE="$(download "$REPO" facet)"  # core archives: facet-<version>-...
 tar -C "$WORK" -xzf "$FILE"
 PKG="$(find "$WORK" -mindepth 1 -maxdepth 1 -type d -name 'facet-*' | head -n1)"
 [[ -n "$PKG" && -x "$PKG/bin/facet" ]] || die "archive does not contain bin/facet"
