@@ -229,7 +229,9 @@ install -Dm755 "$BUILD/facet" "$PREFIX/bin/facet"
 for id in "${!PLUGIN_BIN[@]}"; do
     exec_name="$(basename "${PLUGIN_BIN[$id]}")"
     install -Dm755 "${PLUGIN_BIN[$id]}" "$PLUGIN_ROOT/$id/$exec_name"
-    install -m644 "${PLUGIN_SRC[$id]}/manifest.json" "$PLUGIN_ROOT/$id/manifest.json"
+    manifest="$(dirname "${PLUGIN_BIN[$id]}")/manifest.json"  # built one records the SDK version
+    [[ -f "$manifest" ]] || manifest="${PLUGIN_SRC[$id]}/manifest.json"
+    install -m644 "$manifest" "$PLUGIN_ROOT/$id/manifest.json"
     echo "  plugin $id -> $PLUGIN_ROOT/$id"
 done
 

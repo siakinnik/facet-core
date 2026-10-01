@@ -71,6 +71,54 @@ std::string failure_text(const plugins::Failure& f) {
     return s;
 }
 
+// Short status of a module for lists and tiles.
+struct Status {
+    std::string text;
+    ui::Tone tone;
+};
+
+Status module_status(const plugins::Plugin& p, bool enabled) {
+    using plugins::Block;
+    using plugins::State;
+    if (!enabled) return {tr("Off"), ui::Tone::Dim};
+    switch (p.block) {
+        case Block::Incompatible: return {tr("Incompatible, update needed"), ui::Tone::Bad};
+        case Block::NeedsReview: return {tr("Needs permission"), ui::Tone::Warn};
+        case Block::MissingDependency: return {tr("Missing dependency"), ui::Tone::Warn};
+        case Block::None: break;
+    }
+    switch (p.state) {
+        case State::Running: return {tr("Running"), ui::Tone::Good};
+        case State::Failed: return {tr("Error"), ui::Tone::Bad};
+        case State::Backoff: return {tr("Crashed, restarting…"), ui::Tone::Warn};
+        default: return {tr(plugins::state_name(p.state)), ui::Tone::Dim};
+    }
+}
+
+std::string permission_title(const std::string& perm) {
+    if (perm == "camera") return tr("Camera");
+    if (perm == "network") return tr("Network");
+    if (perm == "system.stats") return tr("System information");
+    if (perm == "display.power") return tr("Screen power");
+    return perm;
+}
+
+std::string permission_text(const std::string& perm) {
+    if (perm == "camera") return tr("Use the cameras. While a module uses a camera, other programs cannot.");
+    if (perm == "network") return tr("Internet and local network access.");
+    if (perm == "system.stats")
+        return tr("Read-only view of the whole system: load, all processes, sensors and disks, like any user of "
+                  "this device.");
+    if (perm == "display.power") return tr("Turn the screen on and off.");
+    return tr("Unknown permission.");
+}
+
+std::string join(const std::vector<std::string>& v) {
+    std::string out;
+    for (const auto& s : v) out += (out.empty() ? "" : ", ") + s;
+    return out;
+}
+
 ui::Tone tone_from(const std::string& s) {
     if (s == "good") return ui::Tone::Good;
     if (s == "warn") return ui::Tone::Warn;
@@ -160,12 +208,14 @@ void App::draw_menu() {
     const std::string& lang = catalog().language();
     tiles.push_back({"__dashboard", tr("Dashboard"), tr("Clock"), ui::Icon::Clock, ui::Tone::Normal});
     for (const auto& p : host_.plugins()) {
-        if (!p->m.has_tile || p->state == plugins::State::Disabled) continue;
+        if (!p->m.has_tile || !host_.is_enabled(p->m.id)) continue;
         TileSpec s{p->m.id, p->m.tile_title.get(lang), p->tile_subtitle, ui::icon_from_name(p->m.tile_icon),
                    ui::Tone::Normal};
-        if (p->state == plugins::State::Failed) s.subtitle = tr("Error"), s.tone = ui::Tone::Bad;
-        else if (p->state == plugins::State::Backoff) s.subtitle = tr("Crashed, restarting…"), s.tone = ui::Tone::Warn;
-        else if (p->state != plugins::State::Running) s.subtitle = tr(plugins::state_name(p->state));
+        if (p->state != plugins::State::Running || p->block != plugins::Block::None) {
+            Status st = module_status(*p, true);
+            s.subtitle = st.text;
+            s.tone = st.tone == ui::Tone::Dim ? ui::Tone::Normal : st.tone;
+        }
         tiles.push_back(std::move(s));
     }
 
@@ -184,9 +234,28 @@ void App::draw_menu() {
         Rect r{g + float(col) * (tw + gap), top + float(row) * (th + gap), tw, th};
         const auto& s = tiles[i];
         if (ui_.tile(s.id, r, s.title, s.subtitle, s.icon, s.tone)) {
-            if (s.id == "__dashboard") navigate(View::Dashboard);
-            else navigate(View::Plugin, s.id);
+            if (s.id == "__dashboard") {
+                navigate(View::Dashboard);
+            } else {
+                const plugins::Plugin* p = host_.find(s.id);
+                if (p && p->block != plugins::Block::None) navigate(View::AppInfo, s.id);
+                else open_plugin(s.id, View::Menu);
+            }
         }
+    }
+
+    // Modules that cannot run (incompatible, waiting for permissions, ...) are
+    // announced here, also those without a tile.
+    if (int n = host_.attention_count()) {
+        std::string label = tr("Modules need attention: {}", {std::to_string(n)});
+        float lw = ui_.text_width(FontRole::Medium, Theme::kSmall, label) + t.dp(64);
+        Rect r{(W - lw) / 2, H - t.dp(84), lw, t.dp(44)};
+        ui::Context::Press pr = ui_.press("attention", r);
+        c.fill_round_rect(r, r.h / 2, pr.held ? t.c.surface_pressed : t.c.surface);
+        float is = t.dp(22);
+        ui::draw_icon(c, ui::Icon::Warning, {r.x + t.dp(18), r.cy() - is / 2, is, is}, t.c.warn);
+        ui_.text(FontRole::Medium, Theme::kSmall, {r.x + t.dp(48), r.y, r.w - t.dp(60), r.h}, label, t.c.text);
+        if (pr.clicked) navigate(View::Apps);
     }
 }
 
@@ -250,7 +319,7 @@ void App::draw_settings(double t) {
     {
         std::vector<std::string> ids = {"builtin"}, names = {tr("Built-in")};
         for (const auto& p : host_.plugins())
-            if (p->m.can("input.keyboard")) {
+            if (p->m.provides_cap("input.keyboard")) {
                 ids.push_back(p->m.id);
                 names.push_back(p->m.name.get(catalog().language()));
             }
@@ -261,20 +330,28 @@ void App::draw_settings(double t) {
         if (ui_.select("keyboard", tr("Keyboard"), names, ki)) config_.set("keyboard", ids[size_t(ki)]);
     }
 
-    ui_.section(tr("Plugins"));
+    // Modules with a settings page (e.g. screen and camera) live here.
     const std::string& lang = catalog().language();
-    if (host_.plugins().empty()) ui_.info(tr("No plugins found"), "", ui::Tone::Dim);
+    bool any_settings = false;
     for (const auto& p : host_.plugins()) {
-        bool on = host_.is_enabled(p->m.id);
-        std::string name = p->m.name.get(lang);
-        if (ui_.toggle("en:" + p->m.id, name, on)) host_.set_enabled(p->m.id, on, t);
-        ui::Tone tone = p->state == plugins::State::Running   ? ui::Tone::Good
-                        : p->state == plugins::State::Failed  ? ui::Tone::Bad
-                        : p->state == plugins::State::Backoff ? ui::Tone::Warn
-                                                              : ui::Tone::Dim;
-        ui_.info("  " + p->m.version, tr(plugins::state_name(p->state)), tone);
-        if (p->state == plugins::State::Failed || p->state == plugins::State::Backoff)
-            if (ui_.button("rs:" + p->m.id, tr("Restart “{}”", {name}))) host_.restart(p->m.id, t);
+        if (!p->m.has_settings || !host_.is_enabled(p->m.id)) continue;
+        if (!any_settings) ui_.section(tr("Modules"));
+        any_settings = true;
+        Status st = module_status(*p, true);
+        bool ok = p->state == plugins::State::Running && p->block == plugins::Block::None;
+        if (ui_.link("ms:" + p->m.id, p->m.settings_title.get(lang), ok ? std::string() : st.text, st.tone)) {
+            if (p->block != plugins::Block::None) navigate(View::AppInfo, p->m.id);
+            else open_plugin(p->m.id, View::Settings);
+        }
+    }
+
+    ui_.section(tr("Apps"));
+    {
+        int n = host_.attention_count();
+        std::string value = n ? tr("need attention: {}", {std::to_string(n)})
+                              : tr("installed: {}", {std::to_string(host_.plugins().size())});
+        if (ui_.link("apps", tr("Installed modules"), value, n ? ui::Tone::Warn : ui::Tone::Normal))
+            navigate(View::Apps);
     }
 
     ui_.section(tr("Network"));
@@ -354,14 +431,100 @@ void App::draw_plugin(double t) {
         render_plugin_ui(*p);
         return;
     }
-    if (ui_.begin_screen("plugin:" + p->m.id, p->m.name.get(catalog().language())) == ui::HeaderHit::Back)
-        navigate(View::Menu);
+    if (ui_.begin_screen("plugin:" + p->m.id, p->m.name.get(catalog().language())) == ui::HeaderHit::Back) {
+        leave_plugin();
+        ui_.end_screen();
+        return;
+    }
     ui_.section(tr("Status"));
     ui_.info(tr("Plugin"), tr(plugins::state_name(p->state)),
              p->state == plugins::State::Failed ? ui::Tone::Bad : ui::Tone::Dim);
     if (!p->error.empty()) ui_.note(failure_text(p->error));
+    if (p->block != plugins::Block::None) ui_.note(tr(p->block_reason));
     if (p->state == plugins::State::Failed || p->state == plugins::State::Backoff)
         if (ui_.button("restart", tr("Restart"), ui::ButtonStyle::Primary)) host_.restart(p->m.id, t);
+    if (ui_.button("info", tr("About this module"))) navigate(View::AppInfo, p->m.id);
+    ui_.end_screen();
+}
+
+// ------------------------------------------------------------------ apps
+
+void App::draw_apps() {
+    if (ui_.begin_screen("apps", tr("Installed modules")) == ui::HeaderHit::Back) {
+        navigate(View::Settings);
+        ui_.end_screen();
+        return;
+    }
+    const std::string& lang = catalog().language();
+    ui_.section({});
+    if (host_.plugins().empty()) ui_.info(tr("No modules installed"), "", ui::Tone::Dim);
+    for (const auto& p : host_.plugins()) {
+        Status st = module_status(*p, host_.is_enabled(p->m.id));
+        if (ui_.link("app:" + p->m.id, p->m.name.get(lang), st.text, st.tone)) navigate(View::AppInfo, p->m.id);
+    }
+    if (!host_.sandbox_active())
+        ui_.note(tr("Modules run without containers because Facet does not run as root: permissions are shown "
+                    "but not enforced."));
+    ui_.end_screen();
+}
+
+void App::draw_app_info(double t) {
+    plugins::Plugin* p = host_.find(plugin_id_);
+    if (!p) {
+        navigate(View::Apps);
+        return;
+    }
+    const std::string& lang = catalog().language();
+    const std::string id = p->m.id;
+    if (ui_.begin_screen("appinfo:" + id, p->m.name.get(lang)) == ui::HeaderHit::Back) {
+        navigate(View::Apps);
+        ui_.end_screen();
+        return;
+    }
+    bool enabled = host_.is_enabled(id);
+    Status st = module_status(*p, enabled);
+
+    ui_.section(tr("Module"));
+    ui_.info(tr("Status"), st.text, st.tone);
+    ui_.info(tr("Version"), p->m.version);
+    ui_.info(tr("Built with SDK"), p->m.sdk.empty() ? tr("unknown") : p->m.sdk,
+             p->m.compatible() ? ui::Tone::Normal : ui::Tone::Bad);
+    if (p->state == plugins::State::Running) ui_.info(tr("Container"), p->sandboxed ? tr("yes") : tr("no"));
+    if (ui_.toggle("enabled", tr("Enabled"), enabled)) host_.set_enabled(id, enabled, t);
+    if (p->state == plugins::State::Running && (p->m.has_tile || p->m.has_settings))
+        if (ui_.link("open", tr("Open"))) open_plugin(id, View::AppInfo);
+    if (p->block != plugins::Block::None) ui_.note(tr(p->block_reason));
+    if (!p->error.empty() && p->state != plugins::State::Running) ui_.note(failure_text(p->error));
+    if (enabled && (p->state == plugins::State::Failed || p->state == plugins::State::Backoff))
+        if (ui_.button("restart", tr("Restart"), ui::ButtonStyle::Primary)) host_.restart(id, t);
+
+    if (p->m.compatible()) {
+        ui_.section(tr("Permissions"));
+        if (p->m.permissions.empty()) {
+            ui_.info(tr("No special permissions"), "", ui::Tone::Dim);
+        } else {
+            for (const auto& perm : p->m.permissions) {
+                bool on = host_.permission_granted(id, perm);
+                if (ui_.toggle("perm:" + perm, permission_title(perm), on)) host_.set_permission(id, perm, on, t);
+            }
+            for (const auto& perm : p->m.permissions) ui_.note(permission_title(perm) + ": " + permission_text(perm));
+        }
+        if (p->block == plugins::Block::NeedsReview) {
+            ui_.note(tr("Choose what to allow, then start the module. You can change this later here."));
+            if (ui_.button("confirm", tr("Start the module"), ui::ButtonStyle::Primary)) host_.confirm_permissions(id, t);
+        }
+        if (!host_.sandbox_active())
+            ui_.note(tr("Not enforced: Facet does not run as root, so modules run without containers."));
+    }
+
+    if (!p->m.provides.empty() || !p->m.requires.empty()) {
+        ui_.section(tr("Dependencies"));
+        std::vector<std::string> prov, req;
+        for (const auto& c : p->m.provides) prov.push_back(c.str());
+        for (const auto& c : p->m.requires) req.push_back(c.str());
+        if (!prov.empty()) ui_.info(tr("Provides"), join(prov));
+        if (!req.empty()) ui_.info(tr("Requires"), join(req));
+    }
     ui_.end_screen();
 }
 
@@ -371,7 +534,9 @@ void App::render_plugin_ui(plugins::Plugin& p) {
     const Json& root = p.ui;
     std::string title = root["title"].as_string(p.m.name.get(catalog().language()));
     if (ui_.begin_screen("plugin:" + p.m.id, title) == ui::HeaderHit::Back) {
-        navigate(View::Menu);
+        leave_plugin();
+        ui_.end_screen();
+        return;
     }
     if (!root["items"].is_array()) p.ui["items"] = Json::array();
     Json& items = p.ui["items"];

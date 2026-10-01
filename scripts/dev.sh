@@ -13,6 +13,7 @@ cmake -S "$PLUGIN_DIR" -B "$PLUGIN_DIR/build" -G Ninja >/dev/null && cmake --bui
 export FACET_DATA=${FACET_DATA:-$PWD/.dev-data}
 export FACET_PLUGIN_PATH=$PLUGIN_DIR/build
 export FACET_SKIP_BOOT_WAIT=1
+export FACET_AUTO_GRANT=${FACET_AUTO_GRANT:-1}  # development: grant requested permissions
 
 if [[ "${1:-}" == "smoke" ]]; then
     mkdir -p shots

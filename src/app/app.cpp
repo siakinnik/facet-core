@@ -249,6 +249,8 @@ void App::run_frame(double t) {
         case View::Dashboard: draw_dashboard(); break;
         case View::Settings: draw_settings(t); break;
         case View::Plugin: draw_plugin(t); break;
+        case View::Apps: draw_apps(); break;
+        case View::AppInfo: draw_app_info(t); break;
     }
     draw_keyboard();
     ui_.end_frame();
@@ -335,7 +337,9 @@ void App::tick(double t) {
         return;
     }
 
-    if ((view_ == View::Settings || view_ == View::Plugin) && t - last_input_ > kIdleToMenu) navigate(View::Menu);
+    if ((view_ == View::Settings || view_ == View::Plugin || view_ == View::Apps || view_ == View::AppInfo) &&
+        t - last_input_ > kIdleToMenu)
+        navigate(View::Menu);
     if ((view_ == View::Menu || view_ == View::Dashboard) && local_now().tm_min != drawn_minute_) dirty_ = true;
     if (net_.take_changed() && (view_ == View::Menu || view_ == View::Settings)) dirty_ = true;
     update_display(t);
@@ -370,11 +374,22 @@ void App::set_timezone(const std::string& zone) {
     dirty_ = true;
 }
 
+void App::open_plugin(const std::string& id, View back) {
+    navigate(View::Plugin, id);
+    plugin_back_ = back;
+}
+
+void App::leave_plugin() {
+    View back = plugin_back_;
+    navigate(back, back == View::AppInfo ? plugin_id_ : std::string());
+}
+
 void App::navigate(View v, const std::string& plugin_id) {
     if (view_ == View::Plugin && (v != View::Plugin || plugin_id != plugin_id_)) host_.set_visible(plugin_id_, false);
     view_ = v;
     plugin_id_ = plugin_id;
     if (v == View::Plugin) host_.set_visible(plugin_id, true);
+    plugin_back_ = View::Menu;
     ui_.reset_interaction();
     ip_cache_.clear();
     tz_region_pending_.reset();

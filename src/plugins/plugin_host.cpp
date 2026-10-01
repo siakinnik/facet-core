@@ -16,6 +16,8 @@
 #include <thread>
 
 #include "core/log.h"
+#include "facet/plugin.h"
+#include "plugins/sandbox.h"
 
 extern char** environ;
 
@@ -57,6 +59,16 @@ std::string describe(const Failure& f) {
     return s;
 }
 
+Capability parse_capability(const std::string& s) {
+    Capability c;
+    size_t at = s.find('@');
+    c.name = s.substr(0, at);
+    if (at != std::string::npos) c.version = std::max(1, std::atoi(s.c_str() + at + 1));
+    return c;
+}
+
+// Plugins with another API version are kept (and shown as incompatible), so
+// only what identifies them must be valid.
 bool load_manifest(const std::string& dir, Manifest& m) {
     Json j;
     if (!load_json_file(dir + "/manifest.json", j) || !j.is_object()) return false;
@@ -64,27 +76,45 @@ bool load_manifest(const std::string& dir, Manifest& m) {
     m.id = j["id"].str();
     m.name = LocalizedString::from(j["name"], m.id);
     m.version = j["version"].as_string("0");
+    m.sdk = j["sdk"].str();
     m.api = j["api"].as_int();
     m.exec = j["exec"].str();
-    for (const auto& c : j["capabilities"].items()) m.capabilities.push_back(c.str());
+    for (const auto& c : j["permissions"].items()) m.permissions.push_back(c.str());
+    for (const auto& c : j["provides"].items()) m.provides.push_back(parse_capability(c.str()));
+    for (const auto& c : j["requires"].items()) m.requires.push_back(parse_capability(c.str()));
     if (j["tile"].is_object()) {
         m.has_tile = true;
         m.tile_title = j["tile"]["title"].is_null() ? m.name : LocalizedString::from(j["tile"]["title"], m.id);
         m.tile_icon = j["tile"]["icon"].as_string("plugin");
     }
+    const Json& settings = j["settings"];
+    if (settings.as_bool() || settings.is_object()) {
+        m.has_settings = true;
+        m.settings_title = settings["title"].is_null() ? m.name : LocalizedString::from(settings["title"], m.id);
+    }
     if (!valid_id(m.id)) {
         log::warn("plugins: %s: invalid id", dir.c_str());
         return false;
     }
-    if (m.api != 1) {
-        log::warn("plugins: %s: unsupported api %d", m.id.c_str(), m.api);
-        return false;
-    }
-    if (m.exec.empty() || m.exec[0] == '/' || m.exec.find("..") != std::string::npos) {
+    if (m.exec.empty() || m.exec[0] == '/' || m.exec.find("..") != std::string::npos ||
+        m.exec.find('/') != std::string::npos) {
         log::warn("plugins: %s: bad exec", m.id.c_str());
         return false;
     }
+    if (!m.compatible())
+        log::warn("plugins: %s: built for api %d (SDK %s), this Facet speaks api %d", m.id.c_str(), m.api,
+                  m.sdk.empty() ? "unknown" : m.sdk.c_str(), sdk::kApiVersion);
     return true;
+}
+
+bool contains(const std::vector<std::string>& v, const std::string& s) {
+    return std::find(v.begin(), v.end(), s) != v.end();
+}
+
+Json string_array(const std::vector<std::string>& v) {
+    Json a = Json::array();
+    for (const auto& s : v) a.push_back(s);
+    return a;
 }
 
 }  // namespace
@@ -92,6 +122,7 @@ bool load_manifest(const std::string& dir, Manifest& m) {
 const char* state_name(State s) {
     switch (s) {
         case State::Disabled: return "disabled";
+        case State::Blocked: return "not started";
         case State::Starting: return "starting…";
         case State::Running: return "running";
         case State::Backoff: return "crashed, restarting";
@@ -120,8 +151,10 @@ LocalizedString LocalizedString::from(const Json& j, const std::string& fallback
     return out;
 }
 
-bool Manifest::can(const std::string& cap) const {
-    return std::find(capabilities.begin(), capabilities.end(), cap) != capabilities.end();
+bool Manifest::compatible() const { return api == sdk::kApiVersion; }
+
+bool Manifest::provides_cap(const std::string& cap) const {
+    return std::any_of(provides.begin(), provides.end(), [&](const Capability& c) { return c.name == cap; });
 }
 
 PluginHost::~PluginHost() { shutdown_all(); }
@@ -171,8 +204,136 @@ bool PluginHost::is_enabled(const std::string& id) const {
 }
 
 void PluginHost::start_enabled(double now) {
+    if (!sandbox::available())
+        log::warn("plugins: containers unavailable (%s); plugins run as plain processes",
+                  getuid() == 0 ? "FACET_SANDBOX=0" : "Facet does not run as root");
+    refresh_blocks(now);
     for (auto& p : plugins_)
-        if (is_enabled(p->m.id)) spawn(*p, now);
+        if (is_enabled(p->m.id) && p->block == Block::None) spawn(*p, now);
+}
+
+// ------------------------------------------------------------------ permissions and dependencies
+
+namespace {
+// Development and tests: FACET_AUTO_GRANT=1 grants every requested permission.
+bool auto_grant() {
+    const char* e = getenv("FACET_AUTO_GRANT");
+    return e && std::strcmp(e, "1") == 0;
+}
+}  // namespace
+
+std::vector<std::string> PluginHost::asked(const std::string& id) const {
+    std::vector<std::string> out;
+    for (const auto& v : config_.get("permissions")[id]["asked"].items()) out.push_back(v.str());
+    return out;
+}
+
+std::vector<std::string> PluginHost::granted_list(const std::string& id) const {
+    std::vector<std::string> out;
+    for (const auto& v : config_.get("permissions")[id]["granted"].items()) out.push_back(v.str());
+    return out;
+}
+
+bool PluginHost::permission_granted(const std::string& id, const std::string& perm) const {
+    if (auto_grant()) return true;
+    return contains(granted_list(id), perm);
+}
+
+void PluginHost::set_permission(const std::string& id, const std::string& perm, bool granted, double now) {
+    Plugin* p = find(id);
+    if (!p) return;
+    std::vector<std::string> g = granted_list(id);
+    g.erase(std::remove(g.begin(), g.end(), perm), g.end());
+    if (granted) g.push_back(perm);
+    Json all = config_.get("permissions");
+    if (!all.is_object()) all = Json::object();
+    all[id]["granted"] = string_array(g);
+    if (!all[id]["asked"].is_array()) all[id]["asked"] = Json::array();
+    config_.set("permissions", all);
+    log::info("plugins: %s: permission %s %s", id.c_str(), perm.c_str(), granted ? "granted" : "revoked");
+    // A running process keeps what it got at start: restart it with the new set.
+    if (p->pid > 0 && p->block == Block::None) restart(id, now);
+    changed_ = true;
+}
+
+void PluginHost::confirm_permissions(const std::string& id, double now) {
+    Plugin* p = find(id);
+    if (!p) return;
+    Json all = config_.get("permissions");
+    if (!all.is_object()) all = Json::object();
+    all[id]["asked"] = string_array(p->m.permissions);
+    if (!all[id]["granted"].is_array()) all[id]["granted"] = Json::array();
+    config_.set("permissions", all);
+    refresh_blocks(now);
+}
+
+int PluginHost::attention_count() const {
+    int n = 0;
+    for (const auto& p : plugins_)
+        if (is_enabled(p->m.id) && (p->block != Block::None || p->state == State::Failed)) ++n;
+    return n;
+}
+
+bool PluginHost::sandbox_active() const { return sandbox::available(); }
+
+uid_t PluginHost::plugin_uid(const std::string& id) {
+    constexpr int kFirstUid = 64000;  // above login users, below systemd's dynamic range
+    Json uids = config_.get("plugin_uids");
+    if (!uids.is_object()) uids = Json::object();
+    if (uids[id].is_number()) return uid_t(uids[id].as_int());
+    int next = kFirstUid;
+    for (const auto& [k, v] : uids.fields()) next = std::max(next, v.as_int() + 1);
+    uids[id] = next;
+    config_.set("plugin_uids", uids);
+    return uid_t(next);
+}
+
+void PluginHost::refresh_blocks(double now) {
+    for (auto& ptr : plugins_) {
+        Plugin& p = *ptr;
+        Block block = Block::None;
+        i18n::Text reason;
+        if (!p.m.compatible()) {
+            block = Block::Incompatible;
+            reason = p.m.api < sdk::kApiVersion
+                         ? i18n::Text{"Made for an older Facet (SDK {}). Disabled until the module is updated.",
+                                      {p.m.sdk.empty() ? "≤ 0.2" : p.m.sdk}}
+                         : i18n::Text{"Made for a newer Facet (SDK {}). Update Facet to use it.",
+                                      {p.m.sdk.empty() ? "?" : p.m.sdk}};
+        } else if (!auto_grant() && std::any_of(p.m.permissions.begin(), p.m.permissions.end(),
+                                                [&](const std::string& perm) { return !contains(asked(p.m.id), perm); })) {
+            block = Block::NeedsReview;
+            reason = "Waiting for you to review its permissions.";
+        } else {
+            for (const auto& need : p.m.requires) {
+                bool found = std::any_of(plugins_.begin(), plugins_.end(), [&](const auto& q) {
+                    return q.get() != &p && q->m.compatible() && is_enabled(q->m.id) &&
+                           std::any_of(q->m.provides.begin(), q->m.provides.end(), [&](const Capability& c) {
+                               return c.name == need.name && c.version >= need.version;
+                           });
+                });
+                if (!found) {
+                    block = Block::MissingDependency;
+                    reason = {"Needs “{}”, which no installed module provides.", {need.str()}};
+                    break;
+                }
+            }
+        }
+        if (block == p.block && reason.key == p.block_reason.key) continue;
+        p.block = block;
+        p.block_reason = reason;
+        changed_ = true;
+        if (block != Block::None) {
+            if (p.pid > 0) kill_now(p);
+            p.state = State::Blocked;
+            p.display.reset();
+            p.ui = Json();
+            log::warn("plugins: %s not started: %s", p.m.id.c_str(), i18n::format(reason.key, reason.args).c_str());
+        } else if (p.state == State::Blocked) {
+            p.state = State::Disabled;
+            if (is_enabled(p.m.id)) spawn(p, now);
+        }
+    }
 }
 
 bool PluginHost::all_settled() const {
@@ -182,6 +343,11 @@ bool PluginHost::all_settled() const {
 // ------------------------------------------------------------------ process management
 
 void PluginHost::spawn(Plugin& p, double now) {
+    if (p.block != Block::None) {
+        p.state = State::Blocked;
+        changed_ = true;
+        return;
+    }
     std::string exe = p.m.dir + "/" + p.m.exec;
     if (::access(exe.c_str(), X_OK) != 0) {
         p.state = State::Failed;
@@ -192,6 +358,26 @@ void PluginHost::spawn(Plugin& p, double now) {
     }
     std::string data_dir = paths::data_root() + "/data/" + p.m.id;
     paths::mkdirs(data_dir);
+    p.granted.clear();
+    for (const auto& perm : p.m.permissions)
+        if (permission_granted(p.m.id, perm)) p.granted.push_back(perm);
+    p.sandboxed = sandbox::available();
+
+    sandbox::Spec spec;
+    if (p.sandboxed) {
+        spec.id = p.m.id;
+        spec.plugin_dir = p.m.dir;
+        spec.exec = p.m.exec;
+        spec.data_dir = data_dir;
+        spec.uid = plugin_uid(p.m.id);
+        spec.granted = p.granted;
+        std::string err = sandbox::prepare(spec);
+        if (!err.empty()) {
+            log::error("plugins: %s: container: %s", p.m.id.c_str(), err.c_str());
+            crash(p, "could not prepare its container", now);
+            return;
+        }
+    }
 
     int in[2], out[2], err[2];
     if (pipe2(in, O_CLOEXEC) || pipe2(out, O_CLOEXEC) || pipe2(err, O_CLOEXEC)) {
@@ -199,41 +385,51 @@ void PluginHost::spawn(Plugin& p, double now) {
         return;
     }
 
-    // Everything the child needs is prepared before fork (no allocation after).
-    std::vector<std::string> env_store;
-    for (char** e = environ; *e; ++e) {
-        if (std::strncmp(*e, "FACET_PLUGIN_", 13) == 0) continue;
-        env_store.emplace_back(*e);
-    }
-    env_store.push_back("FACET_PLUGIN_ID=" + p.m.id);
-    env_store.push_back("FACET_PLUGIN_DATA=" + data_dir);
-    env_store.push_back("FACET_API=1");
-    std::vector<char*> envp;
-    for (auto& s : env_store) envp.push_back(s.data());
-    envp.push_back(nullptr);
-    char* argv[] = {exe.data(), nullptr};
-    pid_t parent = getpid();
+    pid_t pid;
+    std::string plugin_data = p.sandboxed ? "/data" : data_dir;
+    if (p.sandboxed) {
+        // A clean environment: nothing of Facet's leaks into the container.
+        spec.env = {"FACET_PLUGIN_ID=" + p.m.id, "FACET_PLUGIN_DATA=/data",
+                    "FACET_API=" + std::to_string(sdk::kApiVersion), "HOME=/data", "TMPDIR=/tmp",
+                    "PATH=/plugin:/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8"};
+        pid = sandbox::spawn(spec, in[0], out[1], err[1]);
+    } else {
+        // Everything the child needs is prepared before fork (no allocation after).
+        std::vector<std::string> env_store;
+        for (char** e = environ; *e; ++e) {
+            if (std::strncmp(*e, "FACET_PLUGIN_", 13) == 0) continue;
+            env_store.emplace_back(*e);
+        }
+        env_store.push_back("FACET_PLUGIN_ID=" + p.m.id);
+        env_store.push_back("FACET_PLUGIN_DATA=" + data_dir);
+        env_store.push_back("FACET_API=" + std::to_string(sdk::kApiVersion));
+        std::vector<char*> envp;
+        for (auto& e : env_store) envp.push_back(e.data());
+        envp.push_back(nullptr);
+        char* argv[] = {exe.data(), nullptr};
+        pid_t parent = getpid();
 
-    pid_t pid = fork();
+        pid = fork();
+        if (pid == 0) {
+            prctl(PR_SET_PDEATHSIG, SIGTERM);
+            if (getppid() != parent) _exit(1);
+            dup2(in[0], 0);
+            dup2(out[1], 1);
+            dup2(err[1], 2);
+            signal(SIGPIPE, SIG_DFL);
+            sigset_t none;
+            sigemptyset(&none);
+            sigprocmask(SIG_SETMASK, &none, nullptr);
+            setpgid(0, 0);
+            if (chdir(p.m.dir.c_str()) != 0) _exit(126);
+            execve(argv[0], argv, envp.data());
+            _exit(127);
+        }
+    }
     if (pid < 0) {
         for (int fd : {in[0], in[1], out[0], out[1], err[0], err[1]}) ::close(fd);
         crash(p, {"fork failed: {}", {std::strerror(errno)}}, now);
         return;
-    }
-    if (pid == 0) {
-        prctl(PR_SET_PDEATHSIG, SIGTERM);
-        if (getppid() != parent) _exit(1);
-        dup2(in[0], 0);
-        dup2(out[1], 1);
-        dup2(err[1], 2);
-        signal(SIGPIPE, SIG_DFL);
-        sigset_t none;
-        sigemptyset(&none);
-        sigprocmask(SIG_SETMASK, &none, nullptr);
-        setpgid(0, 0);
-        if (chdir(p.m.dir.c_str()) != 0) _exit(126);
-        execve(argv[0], argv, envp.data());
-        _exit(127);
     }
 
     ::close(in[0]);
@@ -255,12 +451,20 @@ void PluginHost::spawn(Plugin& p, double now) {
     p.deadline = now + kHelloTimeout;
     p.display.reset();
     changed_ = true;
-    log::info("plugins: started %s (pid %d)", p.m.id.c_str(), pid);
+    if (p.sandboxed) {
+        std::string perms;
+        for (const auto& g : p.granted) perms += (perms.empty() ? "" : ", ") + g;
+        log::info("plugins: started %s in a container (pid %d, uid %d, permissions: %s)", p.m.id.c_str(), pid,
+                  int(spec.uid), perms.empty() ? "none" : perms.c_str());
+    } else {
+        log::info("plugins: started %s (pid %d)", p.m.id.c_str(), pid);
+    }
 
     Json hello = Json::object();
     hello["t"] = "hello";
-    hello["api"] = 1;
-    hello["data_dir"] = data_dir;
+    hello["api"] = sdk::kApiVersion;
+    hello["data_dir"] = plugin_data;
+    hello["permissions"] = string_array(p.granted);
     hello["theme"] = theme_;
     hello["locale"] = locale_;
     hello["timezone"] = timezone_;
@@ -342,7 +546,10 @@ void PluginHost::on_exit(Plugin& p, int status, double now) {
         log::info("plugins: %s stopped", p.m.id.c_str());
         return;
     }
-    crash(p, "process exited", now);
+    if (p.sandboxed && WIFEXITED(status) && WEXITSTATUS(status) == sandbox::kSetupFailed)
+        crash(p, "could not start its container (details in the log)", now);
+    else
+        crash(p, "process exited", now);
     p.error.wait_status = status;  // already reaped, so crash() could not see it
 }
 
@@ -455,10 +662,11 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
     const std::string& t = msg["t"].str();
     if (p.state == State::Starting) {
         if (t != "hello") return;
-        if (msg["api"].as_int() != 1 || msg["id"].str() != p.m.id) {
+        if (msg["api"].as_int() != sdk::kApiVersion || msg["id"].str() != p.m.id) {
             crash(p, "invalid hello", now);
             return;
         }
+        p.sdk_reported = msg["sdk"].str();
         p.state = State::Running;
         p.error = {};
         p.last_pong = now;
@@ -478,8 +686,8 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
         p.tile_subtitle = msg["subtitle"].str();
         changed_ = true;
     } else if (t == "keyboard_ui" || t == "input") {
-        if (!p.m.can("input.keyboard")) {
-            log::warn("plugins: %s: keyboard message without input.keyboard capability", p.m.id.c_str());
+        if (!p.m.provides_cap("input.keyboard")) {
+            log::warn("plugins: %s: keyboard message, but it does not provide input.keyboard", p.m.id.c_str());
             return;
         }
         if (t == "keyboard_ui") {
@@ -496,8 +704,8 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
             }
         }
     } else if (t == "display") {
-        if (!p.m.can("display.power")) {
-            log::warn("plugins: %s: display request without display.power capability", p.m.id.c_str());
+        if (!contains(p.granted, sandbox::kDisplayPower)) {
+            log::warn("plugins: %s: display request without the display.power permission", p.m.id.c_str());
             return;
         }
         p.display = msg["on"].as_bool(true);
@@ -592,7 +800,7 @@ void PluginHost::set_enabled(const std::string& id, bool enabled, double now) {
     config_.set("plugins_disabled", list);
 
     if (enabled) {
-        if (p->state == State::Disabled || p->state == State::Failed) {
+        if (p->state == State::Disabled || p->state == State::Failed || p->state == State::Blocked) {
             p->crashes.clear();
             spawn(*p, now);
         }
@@ -607,11 +815,12 @@ void PluginHost::set_enabled(const std::string& id, bool enabled, double now) {
     }
     p->display.reset();
     changed_ = true;
+    refresh_blocks(now);  // plugins that depend on this one
 }
 
 void PluginHost::restart(const std::string& id, double now) {
     Plugin* p = find(id);
-    if (!p || !is_enabled(id)) return;
+    if (!p || !is_enabled(id) || p->block != Block::None) return;
     kill_now(*p);
     p->crashes.clear();
     p->error = {};
@@ -645,7 +854,7 @@ void PluginHost::broadcast_activity() {
     Json msg = Json::object();
     msg["t"] = "activity";
     for (auto& p : plugins_)
-        if (p->state == State::Running && p->m.can("display.power")) send(*p, msg);
+        if (p->state == State::Running && contains(p->granted, sandbox::kDisplayPower)) send(*p, msg);
 }
 
 void PluginHost::set_theme(const std::string& theme) { theme_ = theme; }
@@ -683,14 +892,14 @@ void PluginHost::set_locale(const std::string& lang) {
 bool PluginHost::keyboard_ready(const std::string& id) const {
     for (const auto& p : plugins_)
         if (p->m.id == id)
-            return p->state == State::Running && p->m.can("input.keyboard") && p->keyboard_height > 0;
+            return p->state == State::Running && p->m.provides_cap("input.keyboard") && p->keyboard_height > 0;
     return false;
 }
 
 void PluginHost::keyboard_show(const std::string& id, const std::string& mode, float width,
                                const std::vector<std::string>& langs) {
     Plugin* p = find(id);
-    if (!p || p->state != State::Running || !p->m.can("input.keyboard")) return;
+    if (!p || p->state != State::Running || !p->m.provides_cap("input.keyboard")) return;
     p->keyboard_ops = Json();
     p->keyboard_height = 0;
     Json msg = Json::object();
@@ -728,7 +937,8 @@ std::vector<PluginHost::InputAction> PluginHost::take_input() {
 
 std::optional<bool> PluginHost::display_policy() const {
     for (const auto& p : plugins_)
-        if (p->state == State::Running && p->m.can("display.power") && p->display) return p->display;
+        if (p->state == State::Running && contains(p->granted, sandbox::kDisplayPower) && p->display)
+            return p->display;
     return std::nullopt;
 }
 

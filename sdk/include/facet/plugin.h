@@ -11,7 +11,11 @@
 
 namespace facet::sdk {
 
-constexpr int kApiVersion = 1;
+// Protocol and manifest version. Plugins built for another API version are
+// not started; the core shows them as incompatible until they are updated.
+constexpr int kApiVersion = 2;
+// Version of the SDK this plugin is built with ("0.3.0-alpha").
+const char* sdk_version();
 
 // Custom drawing for a `canvas` widget: a list of draw operations the core
 // renders with its own rasterizer. Coordinates and sizes are in dp relative to

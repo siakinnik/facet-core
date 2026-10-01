@@ -23,7 +23,7 @@ public:
     int run();
 
 private:
-    enum class View { Splash, Menu, Dashboard, Settings, Plugin };
+    enum class View { Splash, Menu, Dashboard, Settings, Plugin, Apps, AppInfo };
 
     bool init();
     bool load_fonts();
@@ -32,7 +32,10 @@ private:
     void tick(double t);
     void update_display(double t);
     void run_frame(double t);
+    // plugin_id: the plugin of Plugin and AppInfo views.
     void navigate(View v, const std::string& plugin_id = {});
+    // Opens a plugin's screen; Back returns to `back` (Menu, Settings or AppInfo).
+    void open_plugin(const std::string& id, View back);
     // remember=false: follow the environment until the user picks a language.
     void set_language(const std::string& lang, bool remember = true);
     // "" = system zone. Applies to the core and all plugins.
@@ -47,6 +50,9 @@ private:
     void draw_status_bar(float right, float cy);
     void draw_build_line(float y);
     void draw_plugin(double t);
+    void draw_apps();
+    void draw_app_info(double t);
+    void leave_plugin();
 
     // On-screen keyboard (keyboard.cpp).
     void draw_keyboard();
@@ -68,6 +74,7 @@ private:
 
     View view_ = View::Splash;
     std::string plugin_id_;
+    View plugin_back_ = View::Menu;  // where Back leads from a plugin screen
     bool dirty_ = true, drew_ = false;
     int drawn_minute_ = -1;
     bool night_ = false;

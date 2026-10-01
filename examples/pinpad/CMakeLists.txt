@@ -11,4 +11,4 @@ endif()
 # <build>/examples is a plugin search dir: FACET_PLUGIN_PATH=<build>/examples
 set(PINPAD_OUT ${CMAKE_BINARY_DIR}/examples/pinpad)
 set_target_properties(pinpad PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PINPAD_OUT})
-configure_file(manifest.json ${PINPAD_OUT}/manifest.json COPYONLY)
+facet_plugin_manifest(${CMAKE_CURRENT_SOURCE_DIR}/manifest.json ${PINPAD_OUT}/manifest.json)

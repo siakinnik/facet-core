@@ -66,6 +66,8 @@ public:
     bool time(std::string_view id, std::string_view label, int& minutes, int step = 15);
     void level(std::string_view label, float value, std::string_view text = {});
     bool button(std::string_view id, std::string_view label, ButtonStyle style = ButtonStyle::Normal);
+    // Row that opens another screen: label, value and a chevron. True when tapped.
+    bool link(std::string_view id, std::string_view label, std::string_view value = {}, Tone tone = Tone::Normal);
 
     // ---- Text input. Tapping the field focuses it; the app then shows a
     // keyboard and feeds its keys through push_edit().

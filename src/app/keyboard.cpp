@@ -14,7 +14,7 @@ std::string App::keyboard_plugin() const {
     std::string id = config_.get_str("keyboard", "keyboard");  // the bundled plugin by default
     if (id == "builtin") return {};
     for (const auto& p : host_.plugins())
-        if (p->m.id == id && p->state == plugins::State::Running && p->m.can("input.keyboard")) return id;
+        if (p->m.id == id && p->state == plugins::State::Running && p->m.provides_cap("input.keyboard")) return id;
     return {};
 }
 

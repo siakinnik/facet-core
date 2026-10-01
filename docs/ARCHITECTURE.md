@@ -34,7 +34,7 @@ a plugin can be written in any language that reads and writes JSON lines.
 
 For custom graphics a plugin uses the `canvas` widget: it sends draw
 operations with theme colours and touch targets, and the core still renders
-them (3.5). A pixel-buffer canvas for video can follow; the widget set is
+them (3.6). A pixel-buffer canvas for video can follow; the widget set is
 extensible.
 
 ## 2. Core lifecycle
@@ -66,36 +66,56 @@ $FACET_PLUGIN_PATH                  development: ':'-separated directories
 
 The first directory containing a given plugin id wins.
 
-### 3.2 manifest.json
+### 3.2 manifest.json (API 2)
 
 ```json
 {
   "id": "display-power",
   "name": { "en": "Screen & camera", "ru": "Экран и камера" },
-  "version": "0.0.1",
-  "api": 1,
+  "version": "0.1.0-alpha",
+  "sdk": "0.3.0-alpha",
+  "api": 2,
   "exec": "display-power",
-  "capabilities": ["display.power", "camera"],
-  "tile": { "icon": "display" }
+  "permissions": ["display.power", "camera"],
+  "provides": [],
+  "requires": [],
+  "settings": true
 }
 ```
 
-- `name` and `tile.title` are either a plain string or an object of
-  translations (`en` is the fallback). `tile.title` defaults to `name`.
-- `capabilities` lists what the plugin may do. The core ignores messages the
-  plugin has no right to send (e.g. `display` without `display.power`);
-  `activity` (touch) events go only to plugins with `display.power`;
-  keyboard messages are accepted only from plugins with `input.keyboard`.
+- `api` is the protocol and manifest version (`facet::sdk::kApiVersion`).
+  Plugins with another value are listed but not started: Settings > Apps shows
+  them as incompatible ("made for an older Facet, SDK …") until they are
+  updated. There is no compatibility layer.
+- `sdk` is written by the build (`facet_plugin_manifest()` in the SDK's
+  CMake), so the core can say which SDK an incompatible plugin was built with.
+  The plugin also reports it in its `hello`.
+- `name`, `tile.title` and `settings.title` are a plain string or an object
+  of translations (`en` is the fallback); titles default to `name`.
+- `tile` (optional) puts a tile on the home screen. `settings` (optional,
+  `true` or `{ "title": … }`) lists the plugin's screen under Settings >
+  Modules instead or as well. A plugin may have both, one or none (keyboards).
+- `permissions` are requested; the user grants them in Settings > Apps (§3.4).
+- `provides` / `requires` are versioned capabilities, `"name@version"`
+  (version 1 when omitted). A plugin whose `requires` no enabled plugin
+  `provides` with at least that version is not started ("needs …").
+  Keyboards provide `input.keyboard@1`; the core accepts keyboard messages
+  only from such plugins.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
   `settings`, `warning`, `plugin`, `back`, `chevron`, `shift`, `backspace`,
   `enter`, `gauge`, `chat`, `bell`. Unknown names show the generic plugin icon,
-  so a plugin may use icons of newer cores. Plugins without `tile` (e.g. keyboards) get no menu tile.
+  so a plugin may use icons of newer cores.
 
 Bundled plugins live in `plugins/` of the core repository, are part of every
 core release and are installed and updated together with the core. Today this
 is the default keyboard (`plugins/keyboard`).
 
 ### 3.3 States
+
+Besides the states below, an enabled plugin can be **blocked** and is then
+not started at all: incompatible (`api`), waiting for the user to review its
+permissions, or missing a dependency. The home screen shows "Modules need
+attention" while any enabled plugin is blocked or failed.
 
 ```
           enable                  hello ok
@@ -127,7 +147,35 @@ screen turns on.
 Failure reasons are stored untranslated (message key + arguments + exit
 status) and rendered in the current UI language when shown.
 
-### 3.4 Protocol v1 (NDJSON over stdin/stdout)
+### 3.4 Permissions and containers
+
+| Permission | What the container gets |
+|---|---|
+| (none) | `/plugin` (its directory, read-only), `/data` (its data, read-write), `/tmp`, read-only system libraries (`/usr`, `/lib`), `/dev/null` & co, its own `/proc`; no network (own network namespace, loopback only) |
+| `network` | the host's network, `/etc/resolv.conf`, `/etc/hosts`, `/etc/ssl` |
+| `camera` | `/dev/video*`, `/dev/v4l` and the devices' group |
+| `system.stats` | read-only host `/proc`, `/sys` and the host's root file system at `/host` (system monitors) |
+| `display.power` | no files: the core accepts `display` requests and sends `activity` |
+
+Every plugin runs in its own mount, PID, IPC and UTS namespaces (and network
+namespace without `network`) as its own unprivileged user (uids from 64000,
+remembered in the config as `plugin_uids`), with `no_new_privs`. The data
+directory is handed over to that user (`chown`, mode 0700). Nothing of the
+core's environment is passed in: the plugin gets `FACET_PLUGIN_ID`,
+`FACET_PLUGIN_DATA=/data`, `FACET_API`, `HOME=/data`, `TMPDIR=/tmp`.
+
+A new plugin, or one that requests a new permission, is not started until the
+user has reviewed its permissions in Settings > Apps (each can be granted or
+denied); changing a permission restarts the plugin. Grants are stored in the
+config as `permissions.<id> = {granted: […], asked: […]}`.
+
+Containers need Facet to run as root (the service does). Otherwise, or with
+`FACET_SANDBOX=0`, plugins run as plain processes and the UI says that
+permissions are not enforced. `FACET_AUTO_GRANT=1` grants everything without
+asking (development, tests; `scripts/dev.sh` sets it). Plugins that bring their
+own root file system (container images, e.g. a browser) are the next step.
+
+### 3.5 Protocol v2 (NDJSON over stdin/stdout)
 
 One line = one JSON object with a `t` field. The plugin's stderr goes to the
 core log prefixed with `[id]`.
@@ -136,7 +184,7 @@ Core → plugin:
 
 | `t` | fields | meaning |
 |---|---|---|
-| `hello` | `api`, `data_dir`, `theme`, `locale`, `timezone`, `content_width` | first message |
+| `hello` | `api`, `data_dir`, `permissions` (granted), `theme`, `locale`, `timezone`, `content_width` | first message |
 | `ping` | `seq` | watchdog, answer with `pong` |
 | `visible` | `value: bool` | the plugin screen was opened/closed |
 | `event` | `id`, `value`, `action?` | the user changed a widget; `action: "submit"` when "Done" was pressed in a text field |
@@ -153,9 +201,9 @@ Plugin → core:
 
 | `t` | fields | meaning |
 |---|---|---|
-| `hello` | `api`, `id`, `version` | reply to hello |
+| `hello` | `api`, `sdk`, `id`, `version` | reply to hello |
 | `pong` | `seq` | |
-| `ui` | `root` | screen tree (3.5) |
+| `ui` | `root` | screen tree (3.6) |
 | `tile` | `subtitle` | text under the plugin's menu tile |
 | `display` | `on: bool` | desired screen state (`display.power`) |
 | `keyboard_ui` | `height`, `ops` | the keyboard's drawing: canvas ops, full screen width (`input.keyboard`) |
@@ -164,7 +212,7 @@ Plugin → core:
 Plugins send already-translated text: they get the language in `hello` and
 `locale`. Unknown fields are ignored, so the protocol grows compatibly.
 
-### 3.5 UI tree
+### 3.6 UI tree
 
 ```json
 { "title": "Screen & camera", "items": [

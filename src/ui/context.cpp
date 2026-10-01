@@ -355,6 +355,24 @@ bool Context::toggle(std::string_view id, std::string_view label, bool& value) {
     return pr.clicked;
 }
 
+bool Context::link(std::string_view id, std::string_view label, std::string_view value, Tone tone) {
+    const Theme& t = *theme_;
+    const Palette& c = t.c;
+    Rect r = row(Theme::kRow);
+    Press pr = interact(make_id(id), r);
+    row_highlight(r, pr.held);
+    Rect in = r.inset(t.dp(18), 0);
+    float chev = t.dp(22);
+    float vw = std::min(text_width(FontRole::Regular, Theme::kBody, value), in.w * 0.5f);
+    text(FontRole::Regular, Theme::kBody, in, ellipsize(FontRole::Regular, Theme::kBody, label, in.w - vw - chev - t.dp(20)),
+         c.text);
+    Rect vbox{in.x, in.y, in.w - chev - t.dp(4), in.h};
+    text(FontRole::Regular, Theme::kBody, vbox, ellipsize(FontRole::Regular, Theme::kBody, value, vw + 1),
+         tone == Tone::Normal ? c.text_dim : tone_color(tone), Align::End);
+    draw_icon(*canvas_, Icon::Chevron, {in.right() - chev, r.cy() - chev / 2, chev, chev}, c.text_dim);
+    return pr.clicked;
+}
+
 bool Context::select(std::string_view id, std::string_view label, const std::vector<std::string>& options,
                      int& index) {
     const Theme& t = *theme_;

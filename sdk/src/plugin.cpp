@@ -137,6 +137,12 @@ Screen& Screen::canvas(std::string id, float height, const Canvas& canvas) {
 
 // ---------------------------------------------------------------- Canvas
 
+#ifndef FACET_SDK_VERSION
+#define FACET_SDK_VERSION "unknown"  // set by sdk/CMakeLists.txt
+#endif
+
+const char* sdk_version() { return FACET_SDK_VERSION; }
+
 Json& Canvas::add(const char* op) {
     Json item = Json::object();
     item["op"] = op;
@@ -324,6 +330,7 @@ void Plugin::handle(const Json& msg) {
         Json reply = Json::object();
         reply["t"] = "hello";
         reply["api"] = kApiVersion;
+        reply["sdk"] = sdk_version();
         reply["id"] = id_;
         reply["version"] = version_;
         send(reply);

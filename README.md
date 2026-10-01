@@ -18,7 +18,8 @@ takes the panel down.
 - Every build knows what it is: version, `dev`/`release` channel, git commit
   and repository, shown on the splash, the menu and in Settings, and by
   `facet --version`.
-- Plugins: out-of-process, watchdog-supervised, fail-safe. See
+- Plugins: out-of-process, each in its own container as its own user, with
+  Android-like permissions (Settings > Apps), watchdog-supervised, fail-safe. See
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Status: **alpha** (0.0.1-alpha).

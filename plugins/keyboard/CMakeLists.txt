@@ -10,7 +10,7 @@ endif()
 # <build>/plugins/keyboard: found automatically next to <build>/facet.
 set(KEYBOARD_OUT ${CMAKE_BINARY_DIR}/plugins/keyboard)
 set_target_properties(keyboard PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${KEYBOARD_OUT})
-configure_file(manifest.json ${KEYBOARD_OUT}/manifest.json COPYONLY)
+facet_plugin_manifest(${CMAKE_CURRENT_SOURCE_DIR}/manifest.json ${KEYBOARD_OUT}/manifest.json)
 
 install(TARGETS keyboard RUNTIME DESTINATION lib/facet/plugins/keyboard)
-install(FILES manifest.json DESTINATION lib/facet/plugins/keyboard)
+install(FILES ${KEYBOARD_OUT}/manifest.json DESTINATION lib/facet/plugins/keyboard)
