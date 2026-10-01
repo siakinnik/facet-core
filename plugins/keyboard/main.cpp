@@ -1,5 +1,5 @@
 // Default on-screen keyboard, installed with the core. Any plugin with the
-// input.keyboard capability can replace it (Settings -> Input -> Keyboard).
+// input.keyboard (manifest "provides") can replace it (Settings -> Input -> Keyboard).
 //
 // Protocol: the core sends keyboard_show (field mode, width, languages) and
 // keyboard_key (tapped hit id); the plugin answers with keyboard_ui (canvas)

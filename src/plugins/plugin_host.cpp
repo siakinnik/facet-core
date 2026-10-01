@@ -81,7 +81,7 @@ bool load_manifest(const std::string& dir, Manifest& m) {
     m.exec = j["exec"].str();
     for (const auto& c : j["permissions"].items()) m.permissions.push_back(c.str());
     for (const auto& c : j["provides"].items()) m.provides.push_back(parse_capability(c.str()));
-    for (const auto& c : j["requires"].items()) m.requires.push_back(parse_capability(c.str()));
+    for (const auto& c : j["requires"].items()) m.needs.push_back(parse_capability(c.str()));
     if (j["tile"].is_object()) {
         m.has_tile = true;
         m.tile_title = j["tile"]["title"].is_null() ? m.name : LocalizedString::from(j["tile"]["title"], m.id);
@@ -305,7 +305,7 @@ void PluginHost::refresh_blocks(double now) {
             block = Block::NeedsReview;
             reason = "Waiting for you to review its permissions.";
         } else {
-            for (const auto& need : p.m.requires) {
+            for (const auto& need : p.m.needs) {
                 bool found = std::any_of(plugins_.begin(), plugins_.end(), [&](const auto& q) {
                     return q.get() != &p && q->m.compatible() && is_enabled(q->m.id) &&
                            std::any_of(q->m.provides.begin(), q->m.provides.end(), [&](const Capability& c) {

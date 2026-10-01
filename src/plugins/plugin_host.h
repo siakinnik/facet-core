@@ -40,7 +40,7 @@ struct Manifest {
     LocalizedString name, tile_title, settings_title;
     int api = 0;
     std::vector<std::string> permissions;  // requested; the user grants them
-    std::vector<Capability> provides, requires;
+    std::vector<Capability> provides, needs;  // "provides" / "requires" in the manifest
     std::string tile_icon;
     bool has_tile = false;      // a tile on the home screen
     bool has_settings = false;  // a page under Settings > Modules

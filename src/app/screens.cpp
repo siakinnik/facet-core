@@ -517,11 +517,11 @@ void App::draw_app_info(double t) {
             ui_.note(tr("Not enforced: Facet does not run as root, so modules run without containers."));
     }
 
-    if (!p->m.provides.empty() || !p->m.requires.empty()) {
+    if (!p->m.provides.empty() || !p->m.needs.empty()) {
         ui_.section(tr("Dependencies"));
         std::vector<std::string> prov, req;
         for (const auto& c : p->m.provides) prov.push_back(c.str());
-        for (const auto& c : p->m.requires) req.push_back(c.str());
+        for (const auto& c : p->m.needs) req.push_back(c.str());
         if (!prov.empty()) ui_.info(tr("Provides"), join(prov));
         if (!req.empty()) ui_.info(tr("Requires"), join(req));
     }
