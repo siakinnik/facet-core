@@ -600,9 +600,11 @@ void App::draw_app_info(double t) {
 // screens. Changes are applied locally at once, then sent as events.
 void App::render_plugin_ui(plugins::Plugin& p) {
     const Json& root = p.ui;
-    if (root["fullscreen"].is_string() && p.surface(root["fullscreen"].str())) {
-        draw_fullscreen_surface(p, root["fullscreen"].str());
-        return;
+    if (root["fullscreen"].is_string()) {
+        if (plugins::SurfaceRef s = host_.find_surface(p, root["fullscreen"].str())) {
+            draw_fullscreen_surface(s, root["fullscreen"].str());
+            return;
+        }
     }
     std::string title = root["title"].as_string(p.m.name.get(catalog().language()));
     if (ui_.begin_screen("plugin:" + p.m.id, title) == ui::HeaderHit::Back) {
@@ -668,7 +670,7 @@ void App::render_plugin_ui(plugins::Plugin& p) {
             }
             if (r.submitted) host_.send_event(p.m.id, id, v, "submit");
         } else if (type == "surface") {
-            const plugins::SurfaceBuffer* sb = p.surface(id);
+            const plugins::SurfaceBuffer* sb = host_.find_surface(p, id).buffer;
             float h_dp = float(ci["height"].as_number(0));
             if (h_dp <= 0) {
                 float cw = ui::Context::content_width_dp(theme_, float(canvas_.width()));
@@ -692,29 +694,36 @@ void App::render_plugin_ui(plugins::Plugin& p) {
 // ------------------------------------------------------------------ surfaces
 
 void App::draw_surface(plugins::Plugin& p, const std::string& id, const Rect& r) {
-    const plugins::SurfaceBuffer* sb = p.surface(id);
-    if (!sb) {
+    plugins::SurfaceRef s = host_.find_surface(p, id);
+    if (!s) {
         ui_.canvas().fill_round_rect(r, theme_.dp(Theme::kRadius), theme_.c.surface);
         return;
     }
+    const plugins::SurfaceBuffer* sb = s.buffer;
+    surface_owners_.push_back(s.owner->m.id);
     ui_.canvas().draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, r);
-    track_surface_touch(p, id, r.intersect(ui_.canvas().clip()), sb->w, sb->h, false);
+    track_surface_touch(s.owner->m.id, id, r.intersect(ui_.canvas().clip()), sb->w, sb->h, false);
 }
 
 // The plugin's pixels on the whole screen. The top edge stays Facet's: a
 // swipe down from it goes back, so a full-screen plugin can never trap the user.
-void App::draw_fullscreen_surface(plugins::Plugin& p, const std::string& id) {
-    const plugins::SurfaceBuffer* sb = p.surface(id);
+void App::draw_fullscreen_surface(const plugins::SurfaceRef& s, const std::string& id) {
+    const plugins::SurfaceBuffer* sb = s.buffer;
+    const std::string& owner = s.owner->m.id;
+    surface_owners_.push_back(owner);
     const Theme& t = theme_;
     float W = float(canvas_.width()), H = float(canvas_.height());
+    // The keyboard covers the bottom: the owner may move its content above it.
+    float covered = kb_.visible && kb_.surface_owner == owner ? std::max(0.f, H - kb_rect_.y) : 0.f;
+    host_.send_insets(owner, int(std::lround(covered * float(sb->h) / H)));
     canvas_.fill_rect({0, 0, W, H}, gfx::Color{0, 0, 0, 255});
     canvas_.draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, {0, 0, W, H});
     float pw = t.dp(56), ph = t.dp(5);
     canvas_.fill_round_rect({(W - pw) / 2, t.dp(6), pw, ph}, ph / 2, gfx::Color{255, 255, 255, 110});
-    track_surface_touch(p, id, {0, 0, W, H}, sb->w, sb->h, true);
+    track_surface_touch(owner, id, {0, 0, W, H}, sb->w, sb->h, true);
 }
 
-void App::track_surface_touch(plugins::Plugin& p, const std::string& id, const Rect& r, int sw, int sh,
+void App::track_surface_touch(const std::string& owner, const std::string& id, const Rect& r, int sw, int sh,
                               bool fullscreen) {
     if (r.empty()) return;
     const float edge = theme_.dp(28), swipe = float(canvas_.height()) * 0.12f;
@@ -724,21 +733,24 @@ void App::track_surface_touch(plugins::Plugin& p, const std::string& id, const R
     };
     if (pointer_.pressed && !touch_.active && r.contains(pointer_.x, pointer_.y) &&
         !ui_.overlay().contains(pointer_.x, pointer_.y)) {
-        touch_ = {true, fullscreen && pointer_.y < edge, p.m.id, id, pointer_.y, -1, -1};
-        if (!touch_.gesture) {
-            float x, y;
-            to_surface(x, y);
-            host_.send_touch(p.m.id, id, "down", x, y);
-            touch_.last_x = x, touch_.last_y = y;
-        }
+        touch_ = {true, fullscreen && pointer_.y < edge, owner, id, pointer_.y, -1, -1};
+        float x, y;
+        to_surface(x, y);
+        touch_.last_x = x, touch_.last_y = y;
+        if (!touch_.gesture) host_.send_touch(owner, id, "down", x, y);
         return;
     }
-    if (!touch_.active || touch_.plugin != p.m.id || touch_.surface != id) return;
+    if (!touch_.active || touch_.plugin != owner || touch_.surface != id) return;
     if (touch_.gesture) {
         if (pointer_.down && pointer_.y - touch_.start_y > swipe) {
             touch_ = {};
             leave_plugin();
         } else if (!pointer_.down) {
+            // Not a swipe: a tap near the top edge still reaches the plugin (tabs, menus).
+            if (pointer_.y - touch_.start_y < edge) {
+                host_.send_touch(owner, id, "down", touch_.last_x, touch_.last_y);
+                host_.send_touch(owner, id, "up", touch_.last_x, touch_.last_y);
+            }
             touch_ = {};
         }
         return;
@@ -746,10 +758,10 @@ void App::track_surface_touch(plugins::Plugin& p, const std::string& id, const R
     float x, y;
     to_surface(x, y);
     if (pointer_.down) {
-        if (x != touch_.last_x || y != touch_.last_y) host_.send_touch(p.m.id, id, "move", x, y);
+        if (x != touch_.last_x || y != touch_.last_y) host_.send_touch(owner, id, "move", x, y);
         touch_.last_x = x, touch_.last_y = y;
     } else {
-        host_.send_touch(p.m.id, id, "up", x, y);
+        host_.send_touch(owner, id, "up", x, y);
         touch_ = {};
     }
 }

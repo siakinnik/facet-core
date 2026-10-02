@@ -68,7 +68,7 @@ std::string stage_dir(const std::string& id) {
 // One step of building the container's root, prepared before clone() so the
 // child only makes system calls.
 struct Op {
-    enum Kind { Dir, File, Tmpfs, Bind, Proc, Symlink, Write } kind;
+    enum Kind { Dir, File, Tmpfs, Bind, Proc, Devpts, Symlink, Write } kind;
     std::string src, dst;
     bool ro = true, rec = false;
     std::string data;  // tmpfs options or file contents
@@ -148,6 +148,10 @@ void run_op(const Op& op) {
         case Op::Proc:
             if (mount("proc", dst, "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) fail("proc", dst);
             break;
+        case Op::Devpts:
+            if (mount("devpts", dst, "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,ptmxmode=0666,mode=0620") != 0)
+                fail("devpts", dst);
+            break;
         case Op::Symlink:
             if (symlink(op.src.c_str(), dst) != 0 && errno != EEXIST) fail("symlink", dst);
             break;
@@ -207,6 +211,20 @@ bool prepare_surface_dir(const std::string& id, uid_t uid) {
     }
     if (uid != 0 && chown(dir.c_str(), uid, uid) != 0) return false;
     return chmod(dir.c_str(), 0700) == 0;
+}
+
+std::string endpoint_dir(const std::string& provider, const std::string& capability,
+                         const std::string& consumer) {
+    std::string root = getuid() == 0 ? "/run/facet/endpoints/"
+                                     : "/dev/shm/facet-" + std::to_string(getuid()) + "/endpoints/";
+    std::string dir = root + provider + "/" + capability;
+    return consumer.empty() ? dir : dir + "/" + consumer;
+}
+
+bool prepare_endpoint_dir(const std::string& dir, uid_t uid) {
+    if (!paths::mkdirs(dir)) return false;
+    if (uid != 0 && chown(dir.c_str(), uid, uid) != 0) return false;
+    return chmod(dir.c_str(), 0755) == 0;
 }
 
 std::vector<std::string> device_nodes(const std::string& permission) {
@@ -355,6 +373,13 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
         ops.push_back({Op::Dir, {}, stage + kSurfaceDirInContainer});
         ops.push_back({Op::Bind, spec.surface_dir, stage + kSurfaceDirInContainer, false, false});
     }
+    for (const auto& b : spec.binds) {
+        // Every missing parent inside the container's tmpfs root.
+        for (size_t at = b.inside.find('/', 1); at != std::string::npos; at = b.inside.find('/', at + 1))
+            ops.push_back({Op::Dir, {}, stage + b.inside.substr(0, at)});
+        ops.push_back({Op::Dir, {}, stage + b.inside});
+        ops.push_back({Op::Bind, b.host, stage + b.inside, false, false});
+    }
     ops.push_back({Op::Dir, {}, stage + "/tmp"});
     ops.push_back({Op::Tmpfs, {}, stage + "/tmp", false, false, "mode=0700,size=64m,uid=" + uid + ",gid=" + uid});
 
@@ -363,6 +388,7 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
 
     ops.push_back({Op::Dir, {}, stage + "/etc"});
     add_host_path(ops, stage, "/etc/ld.so.cache");
+    add_host_path(ops, stage, "/etc/fonts");  // font configuration, for plugins that run GUI apps
     std::string group = "plugin:x:" + uid + ":\n";
     std::vector<gid_t> groups;
 
@@ -377,6 +403,11 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
     ops.push_back({Op::Symlink, "/proc/self/fd/0", stage + "/dev/stdin"});
     ops.push_back({Op::Symlink, "/proc/self/fd/1", stage + "/dev/stdout"});
     ops.push_back({Op::Symlink, "/proc/self/fd/2", stage + "/dev/stderr"});
+    // Pseudo-terminals (terminal apps, ssh): a private instance that only
+    // sees the container's own terminals.
+    ops.push_back({Op::Dir, {}, stage + "/dev/pts"});
+    ops.push_back({Op::Devpts, {}, stage + "/dev/pts"});
+    ops.push_back({Op::Symlink, "pts/ptmx", stage + "/dev/ptmx"});
     ops.push_back({Op::Dir, {}, stage + "/dev/shm"});
     ops.push_back({Op::Tmpfs, {}, stage + "/dev/shm", false, false, "mode=0700,size=64m,uid=" + uid + ",gid=" + uid});
     // Device nodes of granted permissions, with their groups.

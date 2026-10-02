@@ -75,7 +75,10 @@ public:
     Surface& operator=(const Surface&) = delete;
 
     // Creates (or resizes) the surface. False if shared memory is unavailable.
-    bool create(Plugin& plugin, const std::string& id, int width, int height);
+    // Providers may lend it to a module that requires one of their
+    // capabilities (`for_module`): that module shows it on its own screen and
+    // its touches and typed text still come here (core 0.6+).
+    bool create(Plugin& plugin, const std::string& id, int width, int height, const std::string& for_module = {});
     void destroy();
     bool valid() const { return map_ != nullptr; }
     // A buffer is free: the core has taken the last presented one.
@@ -92,6 +95,7 @@ private:
     friend class Plugin;
     Plugin* plugin_ = nullptr;
     std::string id_;
+    std::string for_;
     int w_ = 0, h_ = 0, back_ = 0;
     bool waiting_ = false;
     void* map_ = nullptr;
@@ -166,6 +170,20 @@ struct WaylandClient {
     bool focused = false;
 };
 
+// A module that requires a capability of this plugin (core 0.6+).
+struct Consumer {
+    std::string capability, module;
+    std::string dir;  // its endpoint directory, "" unless the capability has an endpoint
+    bool running = false;
+    bool visible = false;  // one of its screens is open
+};
+
+// A surface another plugin lent to this one (Plugin::on_surface_lent).
+struct LentSurface {
+    std::string from;
+    int width = 0, height = 0;
+};
+
 class Plugin {
 public:
     Plugin(std::string id, std::string version);
@@ -218,6 +236,18 @@ public:
     // text_input(true): action "insert" (with text), "backspace", "enter", "hide".
     std::function<void(const std::string& surface, const std::string& kind, float x, float y)> on_touch;
     std::function<void(const std::string& action, const std::string& text)> on_text;
+    // Pixels at the bottom of the full-screen surface the keyboard covers now
+    // (0 when it is closed): move what is typed into above it.
+    std::function<void(int bottom)> on_insets;
+
+    // ---- Capability endpoints (core 0.6+). A capability declared in the
+    // manifest as {"name": ..., "endpoint": true} gets a directory shared
+    // with every module that requires it, e.g. for a socket. Providers learn
+    // about consumers here (also when one opens or closes its screen).
+    std::function<void(const Consumer& consumer)> on_consumer;
+    // A provider lent a surface to this plugin (available) or took it back.
+    // Show it like an own one: Screen::surface(id) / Screen::fullscreen(id).
+    std::function<void(const std::string& id, const LentSurface& s, bool available)> on_surface_lent;
 
     const std::string& data_dir() const { return data_dir_; }
     // Where Surface keeps its shared memory ("" on cores without surfaces).
@@ -227,6 +257,10 @@ public:
     int screen_height() const { return screen_h_; }
     // Width of the content column in dp: the width of canvas widgets.
     int content_width() const { return content_width_; }
+    // Endpoint directory of a capability this plugin requires / provides, "" if none.
+    std::string endpoint(const std::string& capability) const;
+    std::string provided_endpoint(const std::string& capability) const;
+    const std::map<std::string, LentSurface>& lent_surfaces() const { return lent_; }
 
     // Register translation tables here; the language follows the core.
     i18n::Catalog& catalog() { return catalog_; }
@@ -278,6 +312,11 @@ public:
     void input(const std::string& action, const std::string& text = {});  // insert|backspace|enter|hide
     void send(const Json& msg);
 
+    // Calls `on_readable` from run() whenever `fd` has data (a socket, an
+    // event loop's fd, ...). One callback per fd; unwatch before closing it.
+    void watch_fd(int fd, std::function<void()> on_readable);
+    void unwatch_fd(int fd);
+
     // Runs until the core sends shutdown or closes stdin. Returns exit code.
     int run(int tick_ms = 250);
     void quit() { running_ = false; }
@@ -302,6 +341,9 @@ private:
     std::string surface_dir_;
     int screen_w_ = 0, screen_h_ = 0;
     std::map<std::string, Surface*> surfaces_;
+    Json endpoints_;
+    std::map<std::string, LentSurface> lent_;
+    std::map<int, std::function<void()>> watched_;
     friend class Surface;
 };
 

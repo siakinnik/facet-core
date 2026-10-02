@@ -25,12 +25,18 @@ std::vector<std::string> App::keyboard_langs() const {
 }
 
 void App::draw_keyboard() {
-    // Who receives the keys: the focused text field, or the open plugin's
-    // surface while that plugin asks for text input.
+    // Who receives the keys: the focused text field, or the owner of a
+    // surface on screen (the open plugin's own, or one lent to it) while that
+    // owner asks for text input.
     std::string surface_owner;
     if (!ui_.has_focus() && view_ == View::Plugin) {
-        const plugins::Plugin* p = host_.find(plugin_id_);
-        if (p && p->state == plugins::State::Running && p->text_input) surface_owner = p->m.id;
+        for (const auto& id : surface_owners_) {
+            const plugins::Plugin* p = host_.find(id);
+            if (p && p->state == plugins::State::Running && p->text_input) {
+                surface_owner = p->m.id;
+                break;
+            }
+        }
     }
     if (!ui_.has_focus() && surface_owner.empty()) {
         if (kb_.visible) close_keyboard();

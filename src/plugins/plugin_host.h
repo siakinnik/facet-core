@@ -35,6 +35,7 @@ struct Capability {
     std::string name;
     int version = 1;
     std::string install;  // requires only: where to get a provider ("owner/repo"), may be empty
+    bool endpoint = false;  // provides only: share a directory with each consumer (§3.9)
     std::string str() const { return name + "@" + std::to_string(version); }
 };
 
@@ -78,6 +79,7 @@ struct SurfaceBuffer {
     int current = -1;  // buffer shown now, -1 before the first frame
     const uint8_t* map = nullptr;
     size_t size = 0;
+    std::string lent_to;  // shown by this consumer module instead of the owner, "" = own
     const uint32_t* pixels() const {
         return current < 0 ? nullptr
                            : reinterpret_cast<const uint32_t*>(map + size_t(current) * size_t(stride) * size_t(h));
@@ -133,6 +135,7 @@ struct Plugin {
     std::map<std::string, SurfaceBuffer> surfaces;
     bool text_input = false;
     std::string text_mode;
+    int inset_bottom = -1;  // pixels of its full-screen surface covered by the keyboard, as last sent
 
     bool holds(const std::string& perm) const;  // persistent or transient
     const SurfaceBuffer* surface(const std::string& id) const;
@@ -148,6 +151,13 @@ struct WaylandClient {
     std::string module, app_id, title;
     int pid = 0;
     bool focused = false;
+};
+
+// A surface as seen from the module that shows it: its own, or lent to it by a provider.
+struct SurfaceRef {
+    const Plugin* owner = nullptr;  // gets the touches and the typed text
+    const SurfaceBuffer* buffer = nullptr;
+    explicit operator bool() const { return buffer != nullptr; }
 };
 
 // A plugin that runs while none of its screens is open.
@@ -226,6 +236,10 @@ public:
     // Input for a plugin's surface: a finger in surface pixels, or typed text.
     void send_touch(const std::string& id, const std::string& surface, const char* kind, float x, float y);
     void send_text(const std::string& id, const std::string& action, const std::string& text);
+    // The surface `id` that `viewer` may show: its own, else one lent to it (§3.9).
+    SurfaceRef find_surface(const Plugin& viewer, const std::string& id) const;
+    // Pixels at the bottom of the plugin's full-screen surface covered by the keyboard.
+    void send_insets(const std::string& id, int bottom);
 
     // Screen policy from a running plugin with display.power, if any; wake
     // locks and ringing calls force the screen on.
@@ -259,6 +273,14 @@ private:
     void unmap_surfaces(Plugin& p);
     void tell_compositor(Plugin& client, bool running);
     Plugin* compositor();
+    // The enabled plugin providing `need` for `consumer`, if any (§3.2).
+    Plugin* provider_for(const Plugin& consumer, const Capability& need) const;
+    // Capability endpoints: tells providers that a consumer started, stopped
+    // or became (in)visible, and a restarted consumer what is lent to it.
+    void tell_providers(Plugin& consumer, bool running);
+    void tell_consumers(Plugin& provider);
+    void tell_lent(Plugin& consumer);
+    void send_lent(const Plugin& owner, const std::string& id, const std::string& to, const SurfaceBuffer* s);
     void send(Plugin& p, const Json& msg);
     void flush(Plugin& p);
     void read_pipes(Plugin& p, double now);

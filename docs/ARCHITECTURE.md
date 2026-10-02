@@ -115,7 +115,9 @@ The first directory containing a given plugin id wins.
   `requires` entry may be `{ "name": "display.wayland@1", "install":
   "siakinnik/facet-wayland" }`: the user is then told which module to install.
   Capabilities are provided by plugins only (e.g. the Wayland module provides
-  `display.wayland`); the core itself depends on none of them.
+  `display.wayland`); the core itself depends on none of them. A `provides`
+  entry may be `{ "name": "display.wayland@1", "endpoint": true }`: the
+  provider then shares a directory with each module that requires it (§3.9).
   Keyboards provide `input.keyboard@1`; the core accepts keyboard messages
   only from such plugins.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
@@ -175,7 +177,7 @@ dangerous ones shown with a warning (system-wide powers).
 
 | Permission | Level | Transient | What the plugin gets |
 |---|---|---|---|
-| (none) | | | `/plugin` (its directory, read-only), `/data` (its data, read-write), `/tmp`, read-only system libraries (`/usr`, `/lib`), `/dev/null` & co, its own `/proc`; no network (own network namespace, loopback only) |
+| (none) | | | `/plugin` (its directory, read-only), `/data` (its data, read-write), `/tmp`, read-only system libraries (`/usr`, `/lib`) and font configuration (`/etc/fonts`), `/dev/null` & co, its own pseudo-terminals (a private `devpts`), its own `/proc`; no network (own network namespace, loopback only) |
 | `network` | dangerous | | the host's network, `/etc/resolv.conf`, `/etc/hosts`, `/etc/ssl` |
 | `camera` | dangerous | yes | `/dev/video*`, `/dev/v4l` |
 | `microphone` | dangerous | yes | ALSA capture nodes (`/dev/snd/pcmC*D*c`, control, timer) |
@@ -216,8 +218,9 @@ within 5 s is restarted, which closes what it still has open.
 renders headless into a surface that Facet shows, and gets touches and text
 from Facet. Client modules never inherit its permissions. The core tells the compositor
 which `wayland.*` scopes each client module was granted (`wayland_client`),
-and the compositor enforces them (the plan is one `security-context-v1`
-socket per client container).
+and the compositor enforces them: every client module connects through its
+own socket in its own endpoint directory (§3.9), so the compositor knows
+which module each client belongs to and hides the protocols it may not use.
 
 Every plugin runs in its own mount, PID, IPC and UTS namespaces (and network
 namespace without `network`) as its own unprivileged user (uids from 64000,
@@ -248,7 +251,7 @@ Core → plugin:
 
 | `t` | fields | meaning |
 |---|---|---|
-| `hello` | `api`, `data_dir`, `permissions` (granted), `surface_dir`, `screen` (`w`, `h` px), `theme`, `locale`, `timezone`, `content_width` | first message |
+| `hello` | `api`, `data_dir`, `permissions` (granted), `surface_dir`, `screen` (`w`, `h` px), `endpoints` (`provides`/`requires`: capability → directory), `theme`, `locale`, `timezone`, `content_width` | first message |
 | `ping` | `seq` | watchdog, answer with `pong` |
 | `visible` | `value: bool` | the plugin screen was opened/closed |
 | `event` | `id`, `value`, `action?` | the user changed a widget; `action: "submit"` when "Done" was pressed in a text field |
@@ -266,6 +269,9 @@ Core → plugin:
 | `surface_shown` | `id`, `buffer` | the core took this buffer; the other one is free to draw |
 | `touch` | `surface`, `kind` (`down`/`move`/`up`), `x`, `y` | a finger on a surface, in its pixels |
 | `text` | `action` (`insert`/`backspace`/`enter`/`hide`), `text?` | typed on Facet's keyboard while `text_input` is on |
+| `insets` | `bottom` | pixels of the full-screen surface the keyboard covers now (0 when closed) |
+| `consumer` | `capability`, `module`, `dir?`, `running`, `visible` | providers: a module requiring one of its capabilities started/stopped or opened/closed its screen (§3.9) |
+| `surface_lent` | `id`, `from`, `available`, `w?`, `h?` | a provider lent this plugin a surface (or took it back) |
 | `shutdown` | — | exit within 2 s |
 
 Plugin → core:
@@ -289,7 +295,7 @@ Plugin → core:
 | `background` | `value`, `reason?` | background work started / ended (shown in Settings > Apps) |
 | `wake_lock` | `value` | keep the screen on (`wake_lock`) |
 | `wayland_clients` | `clients` | compositor only: the running Wayland clients |
-| `surface` | `id`, `w`, `h`, `stride`, `buffers` | a surface's buffer file is ready (`display.surface`) |
+| `surface` | `id`, `w`, `h`, `stride`, `buffers`, `for?` | a surface's buffer file is ready (`display.surface`); `for`: lend it to that consumer (§3.9) |
 | `surface_frame` | `id`, `buffer` | show this buffer |
 | `surface_destroy` | `id` | |
 | `text_input` | `active`, `mode` | show / hide Facet's keyboard for the surface |
@@ -334,7 +340,36 @@ as `touch` in surface pixels; `text_input(true)` brings up Facet's keyboard
 and the keys arrive as `text`. Facet keeps the top edge of a full-screen
 surface: a swipe down from it goes back, so a plugin can never trap the user.
 This is additive in API 3: cores without surfaces ignore the messages and the
-widget.
+widget. A short tap within the top edge (no swipe) still reaches the surface.
+While the keyboard is open for a full-screen surface its owner gets `insets`
+and can move what is typed into above the keyboard.
+
+### 3.9 Capability endpoints and lent surfaces
+
+Some capabilities need more than messages through the core: a display server
+needs a socket its clients connect to, and the clients' windows must appear
+on the clients' screens. Two generic, additive mechanisms cover this; the
+core knows nothing about what flows through them.
+
+**Endpoints.** A capability provided with `"endpoint": true` gets a directory
+on tmpfs (`/run/facet/endpoints/<provider>/<capability>`). The provider sees
+it at `/run/facet/provides/<capability>`; each module that requires the
+capability gets its own subdirectory, owned by the provider, mounted at
+`/run/facet/requires/<capability>` (paths in `hello.endpoints`;
+`Plugin::endpoint()` / `provided_endpoint()` in the SDK). A consumer never
+sees another consumer's directory, so whatever the provider puts there (e.g.
+a socket) identifies the consumer. The provider learns about consumers from
+`consumer` messages (also when one opens or closes its screen).
+
+**Lent surfaces.** A provider with `display.surface` may create a surface
+`for` a module that requires one of its capabilities. That module gets
+`surface_lent` and shows it like its own (`Screen::surface(id)`,
+`Screen::fullscreen(id)`); it needs no permission for this. Touches, typed
+text and `insets` go to the provider, which owns the pixels. A surface is
+taken back when the provider destroys it or exits.
+
+The Wayland module (facet-wayland) uses both: one socket and one display per
+client module, the display's picture lent to that module.
 
 ### 3.8 UI tree
 

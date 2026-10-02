@@ -70,11 +70,13 @@ std::string describe(const Failure& f) {
     return s;
 }
 
+// Names end up in paths (capability endpoints): the same rules as plugin ids.
 Capability parse_capability(const std::string& s) {
     Capability c;
     size_t at = s.find('@');
     c.name = s.substr(0, at);
     if (at != std::string::npos) c.version = std::max(1, std::atoi(s.c_str() + at + 1));
+    if (!valid_id(c.name) || c.name.find("..") != std::string::npos || c.name[0] == '.') c.name.clear();
     return c;
 }
 
@@ -107,7 +109,12 @@ bool load_manifest(const std::string& dir, Manifest& m) {
         }
         if (!r.name.empty() && !m.permission(r.name)) m.permissions.push_back(std::move(r));
     }
-    for (const auto& c : j["provides"].items()) m.provides.push_back(parse_capability(c.str()));
+    for (const auto& c : j["provides"].items()) {
+        // "name@version" or {"name": "name@version", "endpoint": true}
+        Capability cap = parse_capability(c.is_string() ? c.str() : c["name"].str());
+        cap.endpoint = c["endpoint"].as_bool();
+        if (!cap.name.empty()) m.provides.push_back(std::move(cap));
+    }
     for (const auto& c : j["requires"].items()) {
         // "name@version" or {"name": "name@version", "install": "owner/repo"}
         Capability cap = parse_capability(c.is_string() ? c.str() : c["name"].str());
@@ -379,13 +386,7 @@ void PluginHost::refresh_blocks(double now) {
             reason = {"Needs the “{}” permission.", {denied->name}};
         } else {
             for (const auto& need : p.m.needs) {
-                bool found = std::any_of(plugins_.begin(), plugins_.end(), [&](const auto& q) {
-                    return q.get() != &p && q->m.compatible() && is_enabled(q->m.id) &&
-                           std::any_of(q->m.provides.begin(), q->m.provides.end(), [&](const Capability& c) {
-                               return c.name == need.name && c.version >= need.version;
-                           });
-                });
-                if (!found) {
+                if (!provider_for(p, need)) {
                     block = Block::MissingDependency;
                     reason = {"Needs “{}”, which no installed module provides.", {need.str(), need.install}};
                     break;
@@ -407,6 +408,15 @@ void PluginHost::refresh_blocks(double now) {
             if (is_enabled(p.m.id)) spawn(p, now);
         }
     }
+}
+
+Plugin* PluginHost::provider_for(const Plugin& consumer, const Capability& need) const {
+    for (const auto& q : plugins_)
+        if (q.get() != &consumer && q->m.compatible() && is_enabled(q->m.id) &&
+            std::any_of(q->m.provides.begin(), q->m.provides.end(),
+                        [&](const Capability& c) { return c.name == need.name && c.version >= need.version; }))
+            return q.get();
+    return nullptr;
 }
 
 bool PluginHost::all_settled() const {
@@ -469,6 +479,40 @@ void PluginHost::spawn(Plugin& p, double now) {
     std::string plugin_surfaces = !surfaces_ok          ? std::string()
                                   : p.sandboxed         ? std::string(sandbox::kSurfaceDirInContainer)
                                                         : sandbox::surface_dir(p.m.id);
+    // Capability endpoints: the provider's directory per capability and, for
+    // each capability this plugin requires, its own subdirectory of the provider's.
+    Json endpoints = Json::object();
+    endpoints["provides"] = Json::object();
+    endpoints["requires"] = Json::object();
+    for (const auto& c : p.m.provides) {
+        if (!c.endpoint) continue;
+        std::string host = sandbox::endpoint_dir(p.m.id, c.name);
+        if (!sandbox::prepare_endpoint_dir(host, p.sandboxed ? spec.uid : 0)) {
+            log::warn("plugins: %s: no endpoint directory for %s", p.m.id.c_str(), c.name.c_str());
+            continue;
+        }
+        std::string inside = std::string(sandbox::kProvidesInContainer) + "/" + c.name;
+        if (p.sandboxed) spec.binds.push_back({host, inside});
+        endpoints["provides"][c.name] = p.sandboxed ? inside : host;
+    }
+    for (const auto& need : p.m.needs) {
+        Plugin* prov = provider_for(p, need);
+        if (!prov || std::none_of(prov->m.provides.begin(), prov->m.provides.end(), [&](const Capability& c) {
+                return c.name == need.name && c.endpoint;
+            }))
+            continue;
+        // Owned by the provider: it creates the socket (or whatever it shares) there.
+        uid_t owner = p.sandboxed ? plugin_uid(prov->m.id) : 0;
+        std::string host = sandbox::endpoint_dir(prov->m.id, need.name, p.m.id);
+        if (!sandbox::prepare_endpoint_dir(sandbox::endpoint_dir(prov->m.id, need.name), owner) ||
+            !sandbox::prepare_endpoint_dir(host, owner)) {
+            log::warn("plugins: %s: no endpoint directory for %s", p.m.id.c_str(), need.name.c_str());
+            continue;
+        }
+        std::string inside = std::string(sandbox::kRequiresInContainer) + "/" + need.name;
+        if (p.sandboxed) spec.binds.push_back({host, inside});
+        endpoints["requires"][need.name] = p.sandboxed ? inside : host;
+    }
     if (p.sandboxed) {
         // A clean environment: nothing of Facet's leaks into the container.
         spec.env = {"FACET_PLUGIN_ID=" + p.m.id, "FACET_PLUGIN_DATA=/data",
@@ -554,6 +598,7 @@ void PluginHost::spawn(Plugin& p, double now) {
     hello["locale"] = locale_;
     hello["timezone"] = timezone_;
     hello["content_width"] = content_width_;
+    hello["endpoints"] = endpoints;
     send(p, hello);
     if (p.visible) {
         Json v = Json::object();
@@ -574,6 +619,8 @@ void PluginHost::close_fds(Plugin& p) {
 void PluginHost::reset_runtime(Plugin& p) {
     if (!p.transient.empty() || p.wake_lock || p.subscribed || !p.background_task.empty()) changed_ = true;
     tell_compositor(p, false);
+    tell_providers(p, false);
+    p.inset_bottom = -1;
     if (compositor() == &p || (p.m.provides_cap("display.wayland") && !wayland_clients_.empty())) {
         wayland_clients_.clear();
         changed_ = true;
@@ -794,6 +841,9 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
         } else {
             tell_compositor(p, true);
         }
+        tell_providers(p, true);
+        tell_consumers(p);
+        tell_lent(p);
         log::info("plugins: %s ready (%s)", p.m.id.c_str(), msg["version"].str().c_str());
         return;
     }
@@ -1059,6 +1109,7 @@ void PluginHost::set_visible(const std::string& id, bool visible) {
     msg["t"] = "visible";
     msg["value"] = visible;
     send(*p, msg);
+    tell_providers(*p, true);  // e.g. the compositor renders only what is on screen
 }
 
 void PluginHost::send_event(const std::string& id, const std::string& widget, const Json& value,
@@ -1114,6 +1165,16 @@ void PluginHost::send_touch(const std::string& id, const std::string& surface, c
     msg["kind"] = kind;
     msg["x"] = std::round(x * 10) / 10;
     msg["y"] = std::round(y * 10) / 10;
+    send(*p, msg);
+}
+
+void PluginHost::send_insets(const std::string& id, int bottom) {
+    Plugin* p = find(id);
+    if (!p || p->state != State::Running || p->inset_bottom == bottom) return;
+    p->inset_bottom = bottom;
+    Json msg = Json::object();
+    msg["t"] = "insets";
+    msg["bottom"] = bottom;
     send(*p, msg);
 }
 
@@ -1336,7 +1397,7 @@ void PluginHost::notification_action(uint64_t serial, const std::string& action,
 // ------------------------------------------------------------------ surfaces
 
 namespace {
-constexpr size_t kMaxSurfaces = 4;
+constexpr size_t kMaxSurfaces = 8;  // own and lent
 
 bool valid_surface_id(const std::string& id) {
     if (id.empty() || id.size() > 32) return false;
@@ -1347,8 +1408,10 @@ bool valid_surface_id(const std::string& id) {
 }  // namespace
 
 void PluginHost::unmap_surfaces(Plugin& p) {
-    for (auto& [id, s] : p.surfaces)
+    for (auto& [id, s] : p.surfaces) {
         if (s.map) munmap(const_cast<uint8_t*>(s.map), s.size);
+        if (!s.lent_to.empty()) send_lent(p, id, s.lent_to, nullptr);
+    }
     if (!p.surfaces.empty()) changed_ = true;
     p.surfaces.clear();
 }
@@ -1363,6 +1426,7 @@ void PluginHost::handle_surface(Plugin& p, const Json& msg) {
     if (t == "surface_destroy") {
         if (it != p.surfaces.end()) {
             if (it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
+            if (!it->second.lent_to.empty()) send_lent(p, id, it->second.lent_to, nullptr);
             p.surfaces.erase(it);
             changed_ = true;
         }
@@ -1385,6 +1449,18 @@ void PluginHost::handle_surface(Plugin& p, const Json& msg) {
     int w = msg["w"].as_int(), h = msg["h"].as_int(), stride = msg["stride"].as_int(), buffers = msg["buffers"].as_int();
     if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || stride != w * 4 || buffers < 1 || buffers > 3) return;
     if (it == p.surfaces.end() && p.surfaces.size() >= kMaxSurfaces) return;
+    // Lent to a module that requires a capability of this one (a compositor
+    // shows each app's windows on that app's screen).
+    const std::string lent_to = msg["for"].str();
+    if (!lent_to.empty()) {
+        Plugin* q = find(lent_to);
+        if (!q || q == &p || std::none_of(q->m.needs.begin(), q->m.needs.end(),
+                                          [&](const Capability& c) { return provider_for(*q, c) == &p; })) {
+            log::warn("plugins: %s: surface %s for %s, which does not depend on it", p.m.id.c_str(), id.c_str(),
+                      lent_to.c_str());
+            return;
+        }
+    }
     std::string path = sandbox::surface_dir(p.m.id) + "/" + id + ".buf";
     int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
@@ -1401,10 +1477,46 @@ void PluginHost::handle_surface(Plugin& p, const Json& msg) {
         log::warn("plugins: %s: surface %s: buffer too small or not mappable", p.m.id.c_str(), id.c_str());
         return;
     }
-    if (it != p.surfaces.end() && it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
+    if (it != p.surfaces.end()) {
+        if (it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
+        if (it->second.lent_to != lent_to && !it->second.lent_to.empty()) send_lent(p, id, it->second.lent_to, nullptr);
+    }
     SurfaceBuffer& s = p.surfaces[id];
-    s = SurfaceBuffer{w, h, stride, buffers, -1, static_cast<const uint8_t*>(map), need};
+    s = SurfaceBuffer{w, h, stride, buffers, -1, static_cast<const uint8_t*>(map), need, lent_to};
+    if (!lent_to.empty()) send_lent(p, id, lent_to, &s);
     changed_ = true;
+}
+
+SurfaceRef PluginHost::find_surface(const Plugin& viewer, const std::string& id) const {
+    if (const SurfaceBuffer* own = viewer.surface(id)) return {&viewer, own};
+    for (const auto& q : plugins_) {
+        if (q.get() == &viewer || q->state != State::Running) continue;
+        const SurfaceBuffer* s = q->surface(id);
+        if (s && s->lent_to == viewer.m.id) return {q.get(), s};
+    }
+    return {};
+}
+
+void PluginHost::send_lent(const Plugin& owner, const std::string& id, const std::string& to, const SurfaceBuffer* s) {
+    Plugin* q = find(to);
+    if (!q || q->state != State::Running) return;
+    Json msg = Json::object();
+    msg["t"] = "surface_lent";
+    msg["id"] = id;
+    msg["from"] = owner.m.id;
+    msg["available"] = s != nullptr;
+    if (s) {
+        msg["w"] = s->w;
+        msg["h"] = s->h;
+    }
+    send(*q, msg);
+}
+
+void PluginHost::tell_lent(Plugin& consumer) {
+    for (const auto& q : plugins_)
+        if (q.get() != &consumer && q->state == State::Running)
+            for (const auto& [id, s] : q->surfaces)
+                if (s.lent_to == consumer.m.id) send_lent(*q, id, s.lent_to, &s);
 }
 
 // ------------------------------------------------------------------ background
@@ -1437,6 +1549,40 @@ Plugin* PluginHost::compositor() {
         if (p->state == State::Running && p->m.provides_cap("display.wayland") && p->holds(sandbox::kCompositor))
             return p.get();
     return nullptr;
+}
+
+// ------------------------------------------------------------------ capability endpoints
+
+namespace {
+Json consumer_message(const Plugin& provider, const Plugin& consumer, const Capability& cap, bool running) {
+    Json msg = Json::object();
+    msg["t"] = "consumer";
+    msg["capability"] = cap.name;
+    msg["module"] = consumer.m.id;
+    msg["running"] = running;
+    msg["visible"] = running && consumer.visible;
+    if (std::any_of(provider.m.provides.begin(), provider.m.provides.end(),
+                    [&](const Capability& c) { return c.name == cap.name && c.endpoint; }))
+        msg["dir"] = (provider.sandboxed ? std::string(sandbox::kProvidesInContainer) + "/" + cap.name
+                                         : sandbox::endpoint_dir(provider.m.id, cap.name)) +
+                     "/" + consumer.m.id;
+    return msg;
+}
+}  // namespace
+
+void PluginHost::tell_providers(Plugin& consumer, bool running) {
+    for (const auto& need : consumer.m.needs) {
+        Plugin* prov = provider_for(consumer, need);
+        if (prov && prov->state == State::Running) send(*prov, consumer_message(*prov, consumer, need, running));
+    }
+}
+
+void PluginHost::tell_consumers(Plugin& provider) {
+    for (auto& q : plugins_) {
+        if (q.get() == &provider || q->state != State::Running) continue;
+        for (const auto& need : q->m.needs)
+            if (provider_for(*q, need) == &provider) send(provider, consumer_message(provider, *q, need, true));
+    }
 }
 
 // Tells the compositor which wayland.* scopes a client module has. They are

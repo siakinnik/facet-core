@@ -228,7 +228,7 @@ Json points_json(const std::vector<float>& points) {
 
 // ---------------------------------------------------------------- Surface
 
-bool Surface::create(Plugin& plugin, const std::string& id, int width, int height) {
+bool Surface::create(Plugin& plugin, const std::string& id, int width, int height, const std::string& for_module) {
     destroy();
     if (plugin.surface_dir_.empty() || width <= 0 || height <= 0 || width > 8192 || height > 8192) return false;
     std::string path = plugin.surface_dir_ + "/" + id + ".buf";
@@ -244,6 +244,7 @@ bool Surface::create(Plugin& plugin, const std::string& id, int width, int heigh
     if (map == MAP_FAILED) return false;
     plugin_ = &plugin;
     id_ = id;
+    for_ = for_module;
     w_ = width;
     h_ = height;
     back_ = 0;
@@ -258,6 +259,7 @@ bool Surface::create(Plugin& plugin, const std::string& id, int width, int heigh
     msg["h"] = height;
     msg["stride"] = width * 4;
     msg["buffers"] = 2;
+    if (!for_module.empty()) msg["for"] = for_module;
     plugin.send(msg);
     return true;
 }
@@ -534,6 +536,20 @@ void Plugin::report_wayland_clients(const std::vector<WaylandClient>& clients) {
     send(msg);
 }
 
+std::string Plugin::endpoint(const std::string& capability) const {
+    return endpoints_["requires"][capability].str();
+}
+
+std::string Plugin::provided_endpoint(const std::string& capability) const {
+    return endpoints_["provides"][capability].str();
+}
+
+void Plugin::watch_fd(int fd, std::function<void()> on_readable) {
+    if (fd >= 0) watched_[fd] = std::move(on_readable);
+}
+
+void Plugin::unwatch_fd(int fd) { watched_.erase(fd); }
+
 void Plugin::request_display(bool on) {
     if (last_display_ == int(on)) return;
     last_display_ = int(on);
@@ -552,6 +568,8 @@ void Plugin::handle(const Json& msg) {
         surface_dir_ = msg["surface_dir"].str();
         screen_w_ = msg["screen"]["w"].as_int();
         screen_h_ = msg["screen"]["h"].as_int();
+        endpoints_ = msg["endpoints"];
+        lent_.clear();
         catalog_.set_language(i18n::normalize(msg["locale"].str()));
         if (msg["timezone"].is_string()) apply_timezone(msg["timezone"].str());
         content_width_ = msg["content_width"].as_int(content_width_);
@@ -588,6 +606,19 @@ void Plugin::handle(const Json& msg) {
             on_touch(msg["surface"].str(), msg["kind"].str(), float(msg["x"].as_number()), float(msg["y"].as_number()));
     } else if (t == "text") {
         if (on_text) on_text(msg["action"].str(), msg["text"].str());
+    } else if (t == "insets") {
+        if (on_insets) on_insets(std::max(0, msg["bottom"].as_int()));
+    } else if (t == "consumer") {
+        Consumer c{msg["capability"].str(), msg["module"].str(), msg["dir"].str(), msg["running"].as_bool(),
+                   msg["visible"].as_bool()};
+        if (on_consumer) on_consumer(c);
+    } else if (t == "surface_lent") {
+        const std::string& id = msg["id"].str();
+        LentSurface s{msg["from"].str(), msg["w"].as_int(), msg["h"].as_int()};
+        bool available = msg["available"].as_bool();
+        if (available) lent_[id] = s;
+        else lent_.erase(id);
+        if (on_surface_lent) on_surface_lent(id, s, available);
     } else if (t == "notification_action") {
         if (on_notification_action) on_notification_action(msg["id"].str(), msg["action"].str());
     } else if (t == "notification_posted") {
@@ -659,11 +690,20 @@ int Plugin::run(int tick_ms) {
         int timeout = int(std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now).count());
         if (timeout < 0) timeout = 0;
 
-        pollfd pfd{STDIN_FILENO, POLLIN, 0};
-        int r = ::poll(&pfd, 1, timeout);
+        std::vector<pollfd> fds{{STDIN_FILENO, POLLIN, 0}};
+        for (const auto& [fd, cb] : watched_) fds.push_back({fd, POLLIN, 0});
+        int r = ::poll(fds.data(), nfds_t(fds.size()), timeout);
         if (r < 0 && errno != EINTR) break;
 
-        if (r > 0) {
+        for (size_t i = 1; r > 0 && i < fds.size(); ++i) {
+            if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+            auto it = watched_.find(fds[i].fd);  // a callback may have removed it
+            if (it == watched_.end()) continue;
+            auto cb = it->second;
+            cb();
+        }
+
+        if (r > 0 && (fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
             ssize_t n = ::read(STDIN_FILENO, chunk, sizeof chunk);
             if (n == 0) break;  // core closed the pipe
             if (n < 0 && errno != EINTR && errno != EAGAIN) break;

@@ -21,6 +21,9 @@ takes the panel down.
 - Plugins: out-of-process, each in its own container as its own user, with
   Android-like permissions (optional ones, "while in use" device access),
   notifications with banners and incoming calls, badges, background limits;
+  own pixels (surfaces, also full screen) with touch and the core's keyboard;
+  capabilities shared between modules (e.g. desktop apps through the
+  [Wayland module](https://github.com/siakinnik/facet-wayland));
   watchdog-supervised, fail-safe. See
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

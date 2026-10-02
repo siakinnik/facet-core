@@ -39,6 +39,10 @@ struct Spec {
     std::vector<std::string> granted;
     std::vector<std::string> env;  // "KEY=value", the complete environment
     std::string surface_dir;       // host path, mounted read-write at /run/facet/surface
+    struct Bind {
+        std::string host, inside;  // read-write; `inside` is an absolute path in the container
+    };
+    std::vector<Bind> binds;  // capability endpoints (see endpoint_dir())
 };
 
 // Host directory (on tmpfs) where a plugin's Surface buffers live; emptied
@@ -46,6 +50,17 @@ struct Spec {
 std::string surface_dir(const std::string& id);
 bool prepare_surface_dir(const std::string& id, uid_t uid);
 constexpr const char* kSurfaceDirInContainer = "/run/facet/surface";
+
+// Capability endpoints: a directory shared between the provider of a
+// capability and each module that requires it (e.g. the Wayland socket).
+// Host side: <root>/<provider>/<capability>/<consumer>. The provider sees the
+// whole <capability> directory, each consumer only its own subdirectory.
+std::string endpoint_dir(const std::string& provider, const std::string& capability,
+                         const std::string& consumer = {});
+// Creates the directory (and parents) owned by `uid` (0 = leave the owner), mode 0755.
+bool prepare_endpoint_dir(const std::string& dir, uid_t uid);
+constexpr const char* kProvidesInContainer = "/run/facet/provides";
+constexpr const char* kRequiresInContainer = "/run/facet/requires";
 
 // True when containers can be used: Facet runs as root and FACET_SANDBOX is
 // not "0". Otherwise plugins run as plain processes (development).

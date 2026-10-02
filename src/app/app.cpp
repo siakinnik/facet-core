@@ -246,6 +246,7 @@ void App::run_frame(double t) {
     ui_.begin_frame(canvas_, theme_, pointer_, t);
     ui_.set_overlay(kb_rect_);  // keyboard area of the previous frame
     prepare_overlays(t);        // dialogs, calls and banners take precedence
+    surface_owners_.clear();
     switch (view_) {
         case View::Splash: draw_splash(); break;
         case View::Menu: draw_menu(); break;
