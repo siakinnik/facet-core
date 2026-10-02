@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(facet VERSION 0.3.0 LANGUAGES CXX)
+project(facet VERSION 0.4.0 LANGUAGES CXX)
 set(FACET_VERSION_SUFFIX "alpha")  # pre-release tag; empty for final releases
 
 set(CMAKE_CXX_STANDARD 20)
@@ -18,6 +18,7 @@ add_executable(facet
     src/main.cpp
     src/app/app.cpp
     src/app/keyboard.cpp
+    src/app/overlays.cpp
     src/app/screens.cpp
     src/core/build_info.cpp
     src/core/config.cpp
@@ -34,6 +35,8 @@ add_executable(facet
     src/platform/fbdev.cpp
     src/platform/headless.cpp
     src/platform/platform.cpp
+    src/plugins/notifications.cpp
+    src/plugins/permissions.cpp
     src/plugins/plugin_host.cpp
     src/plugins/sandbox.cpp
     src/ui/canvas_ops.cpp
@@ -76,6 +79,7 @@ add_subdirectory(plugins/keyboard)
 
 if(FACET_BUILD_EXAMPLES)
     add_subdirectory(examples/pinpad)
+    add_subdirectory(examples/showcase)
 endif()
 
 install(TARGETS facet RUNTIME DESTINATION bin)

@@ -17,7 +17,7 @@ using facet::sdk::KeyAction;
 using facet::sdk::Plugin;
 
 int main() {
-    Plugin plugin("keyboard", "0.1.0");
+    Plugin plugin("keyboard", "0.3.0");  // keep in sync with manifest.json
     keyboard_plugin::register_translations(plugin.catalog());
     Keyboard kb;
     float width = 400;

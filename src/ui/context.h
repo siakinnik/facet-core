@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "gfx/canvas.h"
+#include "facet/json.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
 
@@ -105,8 +106,11 @@ public:
     void end_overlay() { in_overlay_ = false; }
 
     // ---- Free-layout building blocks (menus, dashboards).
+    // badge: small count/text on the icon ("" = none); icon_ops: custom icon
+    // drawn with canvas ops on a 24 x 24 grid instead of `icon`.
     bool tile(std::string_view id, const gfx::Rect& r, std::string_view title, std::string_view subtitle,
-              Icon icon, Tone tone = Tone::Normal);
+              Icon icon, Tone tone = Tone::Normal, std::string_view badge = {},
+              const Json* icon_ops = nullptr);
     bool icon_button(std::string_view id, const gfx::Rect& r, Icon icon);
     // A tap that no widget claimed.
     bool background_tap() const;

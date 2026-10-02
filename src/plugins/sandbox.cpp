@@ -9,6 +9,8 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <grp.h>
 
@@ -70,6 +72,9 @@ struct Op {
     std::string src, dst;
     bool ro = true, rec = false;
     std::string data;  // tmpfs options or file contents
+
+    Op(Kind k, std::string s, std::string d, bool read_only = true, bool recursive = false, std::string extra = {})
+        : kind(k), src(std::move(s)), dst(std::move(d)), ro(read_only), rec(recursive), data(std::move(extra)) {}
 };
 
 // Appends what a plain bind of a host path needs, mirroring symlinks.
@@ -164,7 +169,132 @@ int chown_entry(const char* path, const struct stat*, int, FTW*) {
     return 0;
 }
 
+bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+bool ends_with(const std::string& s, char c) { return !s.empty() && s.back() == c; }
+
+std::vector<std::string> list_dev(const std::string& dir, bool (*want)(const std::string&)) {
+    std::vector<std::string> out;
+    if (DIR* d = opendir(dir.c_str())) {
+        while (dirent* e = readdir(d)) {
+            std::string name = e->d_name, path = dir + "/" + name;
+            struct stat st;
+            if (name[0] == '.' || stat(path.c_str(), &st) != 0 || !S_ISCHR(st.st_mode) || !want(name)) continue;
+            out.push_back(path);
+        }
+        closedir(d);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string shared_downloads() { return paths::data_root() + "/shared/Downloads"; }
+
 }  // namespace
+
+std::vector<std::string> device_nodes(const std::string& permission) {
+    if (permission == kCamera) return list_dev("/dev", [](const std::string& n) { return starts_with(n, "video"); });
+    // ALSA: pcmC<card>D<dev>c records, ...p plays; both need the control and timer nodes.
+    if (permission == kMicrophone)
+        return list_dev("/dev/snd", [](const std::string& n) {
+            return (starts_with(n, "pcmC") && ends_with(n, 'c')) || starts_with(n, "control") || n == "timer";
+        });
+    if (permission == kAudio)
+        return list_dev("/dev/snd", [](const std::string& n) {
+            return (starts_with(n, "pcmC") && ends_with(n, 'p')) || starts_with(n, "control") || n == "timer";
+        });
+    if (permission == kGpu)
+        return list_dev("/dev/dri", [](const std::string& n) { return starts_with(n, "renderD"); });
+    if (permission == kCompositor) {
+        auto out = list_dev("/dev/dri", [](const std::string&) { return true; });
+        auto input = list_dev("/dev/input", [](const std::string& n) { return starts_with(n, "event"); });
+        out.insert(out.end(), input.begin(), input.end());
+        return out;
+    }
+    return {};
+}
+
+void signal_all(pid_t pid, bool sandboxed, int sig) {
+    if (pid <= 0) return;
+    if (!sandboxed) {
+        ::kill(-pid, sig);  // the plugin leads its own process group
+        return;
+    }
+    char want[64] = {};
+    std::string ns = "/proc/" + std::to_string(pid) + "/ns/pid";
+    if (readlink(ns.c_str(), want, sizeof want - 1) <= 0) {
+        ::kill(pid, sig);
+        return;
+    }
+    if (DIR* d = opendir("/proc")) {
+        while (dirent* e = readdir(d)) {
+            if (e->d_name[0] < '1' || e->d_name[0] > '9') continue;
+            char link[64] = {};
+            std::string p = std::string("/proc/") + e->d_name + "/ns/pid";
+            if (readlink(p.c_str(), link, sizeof link - 1) > 0 && std::strcmp(link, want) == 0)
+                ::kill(pid_t(std::atoi(e->d_name)), sig);
+        }
+        closedir(d);
+    }
+}
+
+namespace {
+
+// Runs `fn` in a child that has joined the mount namespace of `pid`
+// (setns needs a single-threaded caller). Returns an English error.
+template <typename Fn>
+std::string in_container(pid_t pid, Fn fn) {
+    std::string path = "/proc/" + std::to_string(pid) + "/ns/mnt";
+    int ns = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (ns < 0) return "cannot open " + path;
+    pid_t child = fork();
+    if (child == 0) {
+        if (setns(ns, CLONE_NEWNS) != 0) _exit(2);
+        _exit(fn() ? 0 : 3);
+    }
+    close(ns);
+    if (child < 0) return "fork failed";
+    int st = 0;
+    while (waitpid(child, &st, 0) < 0 && errno == EINTR) {
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return "container update failed (" + std::to_string(WIFEXITED(st) ? WEXITSTATUS(st) : -1) + ")";
+    return {};
+}
+
+}  // namespace
+
+std::string attach_devices(pid_t pid, uid_t uid, const std::string& permission) {
+    struct Node {
+        std::string path;
+        dev_t rdev;
+    };
+    std::vector<Node> nodes;
+    for (const auto& path : device_nodes(permission)) {
+        struct stat st;
+        if (stat(path.c_str(), &st) == 0) nodes.push_back({path, st.st_rdev});
+    }
+    if (nodes.empty()) return {};  // nothing to give (no such device): the plugin will find none
+    return in_container(pid, [&] {
+        for (const auto& n : nodes) {
+            std::string dir = n.path.substr(0, n.path.rfind('/'));
+            mkdir(dir.c_str(), 0755);
+            unlink(n.path.c_str());
+            // Only the plugin's user may use it; no group membership needed.
+            if (mknod(n.path.c_str(), S_IFCHR | 0600, n.rdev) != 0) return false;
+            if (chown(n.path.c_str(), uid, uid) != 0) return false;
+        }
+        return true;
+    });
+}
+
+std::string detach_devices(pid_t pid, const std::string& permission) {
+    std::vector<std::string> nodes = device_nodes(permission);
+    if (nodes.empty()) return {};
+    return in_container(pid, [&] {
+        for (const auto& n : nodes) unlink(n.c_str());  // open handles end when the plugin closes them
+        return true;
+    });
+}
 
 bool available() {
     static const bool ok = [] {
@@ -184,6 +314,11 @@ std::string prepare(const Spec& spec) {
         nftw(spec.data_dir.c_str(), chown_entry, 16, FTW_PHYS);
     }
     chmod(spec.data_dir.c_str(), 0700);
+    if (has(spec.granted, kDownloads)) {
+        // Shared by every plugin allowed to use it: sticky and world-writable, like /tmp.
+        if (!paths::mkdirs(shared_downloads())) return "cannot create " + shared_downloads();
+        chmod(shared_downloads().c_str(), 01777);
+    }
     if (!paths::mkdirs(stage_dir(spec.id))) return "cannot create " + stage_dir(spec.id);
     return {};
 }
@@ -191,6 +326,7 @@ std::string prepare(const Spec& spec) {
 pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
     const std::string stage = stage_dir(spec.id);
     const bool camera = has(spec.granted, kCamera);
+    const bool downloads = has(spec.granted, kDownloads);
     const bool network = has(spec.granted, kNetwork);
     const bool stats = has(spec.granted, kSystemStats);
     const std::string uid = std::to_string(spec.uid);
@@ -225,23 +361,26 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
     ops.push_back({Op::Symlink, "/proc/self/fd/2", stage + "/dev/stderr"});
     ops.push_back({Op::Dir, {}, stage + "/dev/shm"});
     ops.push_back({Op::Tmpfs, {}, stage + "/dev/shm", false, false, "mode=0700,size=64m,uid=" + uid + ",gid=" + uid});
-    if (camera) {
-        if (DIR* d = opendir("/dev")) {
-            while (dirent* e = readdir(d)) {
-                if (std::strncmp(e->d_name, "video", 5) != 0) continue;
-                std::string path = std::string("/dev/") + e->d_name;
-                struct stat st;
-                if (stat(path.c_str(), &st) != 0 || !S_ISCHR(st.st_mode)) continue;
-                ops.push_back({Op::File, {}, stage + path});
-                ops.push_back({Op::Bind, path, stage + path, false, false});
-                if (std::find(groups.begin(), groups.end(), st.st_gid) == groups.end()) {
-                    groups.push_back(st.st_gid);
-                    group += "video:x:" + std::to_string(st.st_gid) + ":plugin\n";
-                }
+    // Device nodes of granted permissions, with their groups.
+    for (const auto& perm : spec.granted) {
+        for (const auto& path : device_nodes(perm)) {
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0) continue;
+            std::string dir = path.substr(0, path.rfind('/'));
+            if (dir != "/dev") ops.push_back({Op::Dir, {}, stage + dir});
+            ops.push_back({Op::File, {}, stage + path});
+            ops.push_back({Op::Bind, path, stage + path, false, false});
+            if (std::find(groups.begin(), groups.end(), st.st_gid) == groups.end()) {
+                groups.push_back(st.st_gid);
+                group += "dev" + std::to_string(st.st_gid) + ":x:" + std::to_string(st.st_gid) + ":plugin\n";
             }
-            closedir(d);
         }
-        add_host_path(ops, stage, "/dev/v4l");
+    }
+    if (camera) add_host_path(ops, stage, "/dev/v4l");
+    if (downloads) {
+        ops.push_back({Op::Dir, {}, stage + "/shared"});
+        ops.push_back({Op::Dir, {}, stage + "/shared/Downloads"});
+        ops.push_back({Op::Bind, shared_downloads(), stage + "/shared/Downloads", false, false});
     }
 
     if (network) {
@@ -307,7 +446,9 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
     if (umount2("/.oldroot", MNT_DETACH) != 0) fail("detach old root", nullptr);
     rmdir("/.oldroot");
     if (mount(nullptr, "/", nullptr, MS_REMOUNT | MS_RDONLY | MS_NOSUID, nullptr) != 0) fail("read-only root", nullptr);
-    sethostname("facet", 5);
+    if (sethostname("facet", 5) != 0) {
+        // Cosmetic only: the plugin works with any host name.
+    }
 
     // Drop root for good: own user, only the groups of granted devices.
     if (setgroups(groups.size(), groups.data()) != 0) fail("setgroups", nullptr);

@@ -9,7 +9,7 @@ namespace facet::ui {
 
 enum class Icon {
     None, Clock, Display, Camera, Settings, Back, Plugin, Warning, Chevron, Shift, Backspace, Enter,
-    Gauge, Chat, Bell
+    Gauge, Chat, Bell, Mic, Phone, Close
 };
 
 Icon icon_from_name(std::string_view name);

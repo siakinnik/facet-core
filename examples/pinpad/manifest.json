@@ -1,8 +1,8 @@
 {
   "id": "example-pinpad",
   "name": { "en": "PIN pad demo", "ru": "Демо PIN-панели" },
-  "version": "0.0.2",
-  "api": 2,
+  "version": "0.0.3",
+  "api": 3,
   "exec": "pinpad",
   "permissions": [],
   "tile": { "icon": "plugin" }

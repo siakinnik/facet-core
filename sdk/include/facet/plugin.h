@@ -13,7 +13,7 @@ namespace facet::sdk {
 
 // Protocol and manifest version. Plugins built for another API version are
 // not started; the core shows them as incompatible until they are updated.
-constexpr int kApiVersion = 2;
+constexpr int kApiVersion = 3;
 // Version of the SDK this plugin is built with ("0.3.0-alpha").
 const char* sdk_version();
 
@@ -89,6 +89,38 @@ private:
     Json root_;
 };
 
+// A notification posted to the core (permission "notifications"). Posting
+// again with the same id replaces it.
+struct Notification {
+    std::string id;
+    std::string title, body;
+    // "message", "call" (full-screen incoming call with Accept / Decline,
+    // rings until answered or cancelled), "alarm", "status" (silent, no banner).
+    std::string kind = "message";
+    std::string priority = "normal";  // "low", "normal", "high" (high and calls wake the screen)
+    std::string icon;                 // built-in icon name; default: the plugin's tile icon
+    // Buttons: {action id, label}. Calls get "accept" / "decline" automatically.
+    std::vector<std::pair<std::string, std::string>> actions;
+    int timeout_s = 0;  // calls: stop ringing after this many seconds (0 = 45 s)
+
+    // Notification distributors only (permission "notifications.distributor"):
+    // post on behalf of another module, or of an app that is no module
+    // (e.g. a Wayland client), shown under `app_name`.
+    std::string source;
+    std::string app_name;
+
+    Json to_json() const;
+};
+
+// A Wayland client as reported by the compositor module (display.wayland provider).
+struct WaylandClient {
+    std::string module;   // the Facet module that started it
+    std::string app_id;   // xdg_toplevel app id
+    std::string title;
+    int pid = 0;
+    bool focused = false;
+};
+
 class Plugin {
 public:
     Plugin(std::string id, std::string version);
@@ -115,6 +147,27 @@ public:
     std::function<void()> on_tick;
     std::function<void()> on_shutdown;
 
+    // ---- Permissions. `permissions()` are those in effect (granted at start
+    // plus transient grants now held). Optional permissions may be missing:
+    // check before use and keep working without them.
+    // Result of request_permission(), or a transient grant taken back by the user.
+    std::function<void(const std::string& name, bool granted)> on_permission;
+
+    // ---- Notifications.
+    // A notification of this plugin was tapped ("open"), dismissed ("dismiss"),
+    // a call answered ("accept" / "decline" / "timeout"), or a button pressed.
+    std::function<void(const std::string& id, const std::string& action)> on_notification_action;
+    // Distributors that called subscribe_notifications(): every notification
+    // posted in the system, with "source" / "app_name".
+    std::function<void(const Json& notification)> on_notification_posted;
+
+    // ---- Wayland compositor modules (provide display.wayland, permission
+    // wayland.compositor): a client module started or stopped, with the
+    // wayland.* scopes the user granted it. Its own permissions are never
+    // inherited from the compositor.
+    std::function<void(const std::string& module, const std::vector<std::string>& scopes, bool running)>
+        on_wayland_client;
+
     const std::string& data_dir() const { return data_dir_; }
     // Width of the content column in dp: the width of canvas widgets.
     int content_width() const { return content_width_; }
@@ -125,11 +178,41 @@ public:
     std::string tr(std::string_view key, const std::vector<std::string>& args) const { return catalog_.tr(key, args); }
     std::string render(const i18n::Text& t) const { return catalog_.render(t); }
     bool visible() const { return visible_; }
+    const std::vector<std::string>& permissions() const { return permissions_; }
+    bool has_permission(const std::string& name) const;
 
     // Senders skip messages identical to the previously sent value.
     void set_ui(const Screen& screen);
     void set_tile(const std::string& subtitle);
     void request_display(bool on);
+
+    // Dynamic tile: a badge (e.g. unread count; 0 or "" hides it) and an icon,
+    // either a built-in name or a drawing on a 24 x 24 grid.
+    void set_badge(int count);
+    void set_badge(const std::string& text);
+    void set_tile_icon(const std::string& builtin);
+    void set_tile_icon(const Canvas& icon);
+
+    // Transient permissions ("while in use", e.g. the camera during a call):
+    // ask for access now, answer in on_permission; release as soon as the
+    // stream ends. Access is also withdrawn when the process exits.
+    void request_permission(const std::string& name, const std::string& reason = {});
+    void release_permission(const std::string& name);
+
+    void notify(const Notification& n);
+    void cancel_notification(const std::string& id, const std::string& source = {});
+    // Distributors: receive copies of all notifications (on_notification_posted).
+    void subscribe_notifications(bool on = true);
+
+    // Background work, listed in Settings > Apps (permission "background";
+    // without it the plugin is suspended while none of its screens is open).
+    void begin_background(const std::string& reason);
+    void end_background();
+    // Keep the screen on while held (permission "wake_lock").
+    void wake_lock(bool on);
+
+    // Compositor modules: the Wayland clients that are running now.
+    void report_wayland_clients(const std::vector<WaylandClient>& clients);
     // Keyboard plugins: current keyboard drawing and typed actions.
     void keyboard_ui(float height, const Canvas& canvas);
     void input(const std::string& action, const std::string& text = {});  // insert|backspace|enter|hide
@@ -154,6 +237,8 @@ private:
     Json last_ui_;
     std::string last_tile_;
     int last_display_ = -1;
+    std::vector<std::string> permissions_;
+    Json last_badge_, last_icon_;
 };
 
 }  // namespace facet::sdk

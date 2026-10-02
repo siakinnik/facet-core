@@ -85,10 +85,11 @@ Status module_status(const plugins::Plugin& p, bool enabled) {
         case Block::Incompatible: return {tr("Incompatible, update needed"), ui::Tone::Bad};
         case Block::NeedsReview: return {tr("Needs permission"), ui::Tone::Warn};
         case Block::MissingDependency: return {tr("Missing dependency"), ui::Tone::Warn};
+        case Block::MissingPermission: return {tr("Permission denied"), ui::Tone::Warn};
         case Block::None: break;
     }
     switch (p.state) {
-        case State::Running: return {tr("Running"), ui::Tone::Good};
+        case State::Running: return p.frozen ? Status{tr("Paused"), ui::Tone::Dim} : Status{tr("Running"), ui::Tone::Good};
         case State::Failed: return {tr("Error"), ui::Tone::Bad};
         case State::Backoff: return {tr("Crashed, restarting…"), ui::Tone::Warn};
         default: return {tr(plugins::state_name(p.state)), ui::Tone::Dim};
@@ -96,21 +97,20 @@ Status module_status(const plugins::Plugin& p, bool enabled) {
 }
 
 std::string permission_title(const std::string& perm) {
-    if (perm == "camera") return tr("Camera");
-    if (perm == "network") return tr("Network");
-    if (perm == "system.stats") return tr("System information");
-    if (perm == "display.power") return tr("Screen power");
-    return perm;
+    const plugins::PermissionInfo* info = plugins::permission_info(perm);
+    return info ? tr(info->title) : perm;
 }
 
 std::string permission_text(const std::string& perm) {
-    if (perm == "camera") return tr("Use the cameras. While a module uses a camera, other programs cannot.");
-    if (perm == "network") return tr("Internet and local network access.");
-    if (perm == "system.stats")
-        return tr("Read-only view of the whole system: load, all processes, sensors and disks, like any user of "
-                  "this device.");
-    if (perm == "display.power") return tr("Turn the screen on and off.");
-    return tr("Unknown permission.");
+    const plugins::PermissionInfo* info = plugins::permission_info(perm);
+    return info ? tr(info->description) : tr("Unknown permission.");
+}
+
+// Why a module is not started, in the UI language.
+std::string block_text(const plugins::Plugin& p) {
+    if (p.block == plugins::Block::MissingPermission && !p.block_reason.args.empty())
+        return tr("Needs the “{}” permission.", {permission_title(p.block_reason.args[0])});
+    return tr(p.block_reason);
 }
 
 std::string join(const std::vector<std::string>& v) {
@@ -195,7 +195,18 @@ void App::draw_menu() {
     float touch = t.dp(Theme::kTouch) * 1.3f;
     if (ui_.icon_button("settings", {W - g - touch + t.dp(10), t.dp(28), touch, touch}, ui::Icon::Settings))
         navigate(View::Settings);
-    draw_status_bar(W - g - touch, t.dp(28) + touch / 2);
+    float status_right = W - g - touch;
+    if (size_t n = host_.notifications().list().size()) {
+        Rect bell{status_right - touch, t.dp(28), touch, touch};
+        if (ui_.icon_button("bell", bell, ui::Icon::Bell)) navigate(View::Notifications);
+        std::string count = n > 99 ? "99+" : std::to_string(n);
+        float bh = t.dp(20), bw = std::max(bh, ui_.text_width(FontRole::Medium, 12, count) + t.dp(10));
+        Rect b{bell.cx() + t.dp(4), bell.y + t.dp(6), bw, bh};
+        c.fill_round_rect(b, bh / 2, t.c.bad);
+        ui_.text(FontRole::Medium, 12, b, count, gfx::Color{255, 255, 255, 255}, Align::Center);
+        status_right -= touch + t.dp(8);
+    }
+    draw_status_bar(status_right, t.dp(28) + touch / 2);
     draw_build_line(H - t.dp(28));
 
     // Tiles: built-in dashboard + one per plugin that declares a tile.
@@ -203,14 +214,17 @@ void App::draw_menu() {
         std::string id, title, subtitle;
         ui::Icon icon;
         ui::Tone tone;
+        std::string badge;
+        const Json* icon_ops = nullptr;
     };
     std::vector<TileSpec> tiles;
     const std::string& lang = catalog().language();
-    tiles.push_back({"__dashboard", tr("Dashboard"), tr("Clock"), ui::Icon::Clock, ui::Tone::Normal});
+    tiles.push_back({"__dashboard", tr("Dashboard"), tr("Clock"), ui::Icon::Clock, ui::Tone::Normal, {}, nullptr});
     for (const auto& p : host_.plugins()) {
         if (!p->m.has_tile || !host_.is_enabled(p->m.id)) continue;
-        TileSpec s{p->m.id, p->m.tile_title.get(lang), p->tile_subtitle, ui::icon_from_name(p->m.tile_icon),
-                   ui::Tone::Normal};
+        TileSpec s{p->m.id, p->m.tile_title.get(lang), p->tile_subtitle,
+                   ui::icon_from_name(p->tile_icon_name.empty() ? p->m.tile_icon : p->tile_icon_name),
+                   ui::Tone::Normal, p->badge, p->tile_icon_ops.is_array() ? &p->tile_icon_ops : nullptr};
         if (p->state != plugins::State::Running || p->block != plugins::Block::None) {
             Status st = module_status(*p, true);
             s.subtitle = st.text;
@@ -233,7 +247,7 @@ void App::draw_menu() {
         int col = int(i) % cols, row = int(i) / cols;
         Rect r{g + float(col) * (tw + gap), top + float(row) * (th + gap), tw, th};
         const auto& s = tiles[i];
-        if (ui_.tile(s.id, r, s.title, s.subtitle, s.icon, s.tone)) {
+        if (ui_.tile(s.id, r, s.title, s.subtitle, s.icon, s.tone, s.badge, s.icon_ops)) {
             if (s.id == "__dashboard") {
                 navigate(View::Dashboard);
             } else {
@@ -288,7 +302,7 @@ void App::draw_dashboard() {
 
 // ------------------------------------------------------------------ settings
 
-void App::draw_settings(double t) {
+void App::draw_settings(double) {
     if (ui_.begin_screen("settings", tr("Settings")) == ui::HeaderHit::Back) navigate(View::Menu);
 
     ui_.section(tr("Appearance"));
@@ -440,7 +454,7 @@ void App::draw_plugin(double t) {
     ui_.info(tr("Plugin"), tr(plugins::state_name(p->state)),
              p->state == plugins::State::Failed ? ui::Tone::Bad : ui::Tone::Dim);
     if (!p->error.empty()) ui_.note(failure_text(p->error));
-    if (p->block != plugins::Block::None) ui_.note(tr(p->block_reason));
+    if (p->block != plugins::Block::None) ui_.note(block_text(*p));
     if (p->state == plugins::State::Failed || p->state == plugins::State::Backoff)
         if (ui_.button("restart", tr("Restart"), ui::ButtonStyle::Primary)) host_.restart(p->m.id, t);
     if (ui_.button("info", tr("About this module"))) navigate(View::AppInfo, p->m.id);
@@ -465,6 +479,19 @@ void App::draw_apps() {
     if (!host_.sandbox_active())
         ui_.note(tr("Modules run without containers because Facet does not run as root: permissions are shown "
                     "but not enforced."));
+
+    auto background = host_.background_registry();
+    if (!background.empty()) {
+        ui_.section(tr("Running in the background"));
+        for (const auto& b : background)
+            if (ui_.link("bg:" + b.plugin, module_name(b.plugin), b.task)) navigate(View::AppInfo, b.plugin);
+    }
+    const auto& wayland = host_.wayland_clients();
+    if (!wayland.empty()) {
+        ui_.section(tr("Desktop apps (Wayland)"));
+        for (const auto& w : wayland)
+            ui_.info(w.title.empty() ? w.app_id : w.title, module_name(w.module) + (w.focused ? " · " + tr("on screen") : ""));
+    }
     ui_.end_screen();
 }
 
@@ -493,21 +520,46 @@ void App::draw_app_info(double t) {
     if (ui_.toggle("enabled", tr("Enabled"), enabled)) host_.set_enabled(id, enabled, t);
     if (p->state == plugins::State::Running && (p->m.has_tile || p->m.has_settings))
         if (ui_.link("open", tr("Open"))) open_plugin(id, View::AppInfo);
-    if (p->block != plugins::Block::None) ui_.note(tr(p->block_reason));
+    if (p->block != plugins::Block::None) ui_.note(block_text(*p));
     if (!p->error.empty() && p->state != plugins::State::Running) ui_.note(failure_text(p->error));
     if (enabled && (p->state == plugins::State::Failed || p->state == plugins::State::Backoff))
         if (ui_.button("restart", tr("Restart"), ui::ButtonStyle::Primary)) host_.restart(id, t);
 
     if (p->m.compatible()) {
         ui_.section(tr("Permissions"));
-        if (p->m.permissions.empty()) {
-            ui_.info(tr("No special permissions"), "", ui::Tone::Dim);
-        } else {
-            for (const auto& perm : p->m.permissions) {
-                bool on = host_.permission_granted(id, perm);
-                if (ui_.toggle("perm:" + perm, permission_title(perm), on)) host_.set_permission(id, perm, on, t);
+        if (p->m.permissions.empty()) ui_.info(tr("No special permissions"), "", ui::Tone::Dim);
+        for (const auto& r : p->m.permissions) {
+            const plugins::PermissionInfo* info = plugins::permission_info(r.name);
+            std::string title = permission_title(r.name);
+            if (r.optional) title += " (" + tr("optional") + ")";
+            plugins::Grant g = host_.shown_grant(id, r);
+            if (!info) {
+                ui_.info(title, tr("unknown to this Facet"), ui::Tone::Dim);
+            } else if (r.transient) {
+                std::vector<std::string> options = {tr("Allow while in use"), tr("Ask every time"), tr("Don't allow")};
+                int index = g == plugins::Grant::Allow ? 0 : g == plugins::Grant::Deny ? 2 : 1;
+                if (ui_.select("perm:" + r.name, title, options, index)) {
+                    plugins::Grant chosen = index == 0 ? plugins::Grant::Allow
+                                            : index == 2 ? plugins::Grant::Deny
+                                                         : plugins::Grant::Ask;
+                    host_.set_grant(id, r.name, chosen, t);
+                }
+                if (std::find(p->transient.begin(), p->transient.end(), r.name) != p->transient.end())
+                    if (ui_.link("stop:" + r.name, tr("In use now"), tr("Stop"), ui::Tone::Warn))
+                        host_.revoke_transient(id, r.name, t);
+            } else {
+                bool on = g == plugins::Grant::Allow;
+                if (ui_.toggle("perm:" + r.name, title, on))
+                    host_.set_grant(id, r.name, on ? plugins::Grant::Allow : plugins::Grant::Deny, t);
             }
-            for (const auto& perm : p->m.permissions) ui_.note(permission_title(perm) + ": " + permission_text(perm));
+        }
+        for (const auto& r : p->m.permissions) {
+            const plugins::PermissionInfo* info = plugins::permission_info(r.name);
+            std::string text = permission_title(r.name) + ": " + permission_text(r.name);
+            std::string why = r.reason.get(lang);
+            if (!why.empty()) text += " " + tr("The module says: {}", {why});
+            if (info && info->level == plugins::Level::Special) text += " " + tr("Special access: allow only modules you trust.");
+            ui_.note(text);
         }
         if (p->block == plugins::Block::NeedsReview) {
             ui_.note(tr("Choose what to allow, then start the module. You can change this later here."));

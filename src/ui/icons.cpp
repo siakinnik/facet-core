@@ -24,6 +24,9 @@ Icon icon_from_name(std::string_view name) {
     if (name == "gauge") return Icon::Gauge;
     if (name == "chat") return Icon::Chat;
     if (name == "bell") return Icon::Bell;
+    if (name == "mic") return Icon::Mic;
+    if (name == "phone") return Icon::Phone;
+    if (name == "close") return Icon::Close;
     return Icon::Plugin;
 }
 
@@ -146,13 +149,46 @@ void draw_icon(gfx::Canvas& c, Icon icon, const Rect& box, gfx::Color color) {
             break;
         }
         case Icon::Bell: {
-            Point body[8] = {P(12, 3), P(16.5f, 5.5f), P(17.5f, 11), P(18.5f, 15), P(21, 18), P(3, 18), P(5.5f, 15),
-                             P(6.5f, 11)};
-            p.polygon(body, 8);
-            Point hole[8] = {P(12, 5.2f), P(8.4f, 11.2f), P(7.6f, 15.4f), P(6.3f, 16.2f), P(17.7f, 16.2f),
-                             P(16.4f, 15.4f), P(15.6f, 11.2f), P(14.9f, 6.9f)};
-            p.polygon(hole, 8);  // opposite winding -> hole
-            p.circle(ox + 12 * s, oy + 20.5f * s, 2.f * s);
+            // Outline: a dome over straight flanks, a flared rim, the clapper below.
+            std::vector<Point> outline;
+            for (int i = 0; i <= 12; ++i) {
+                float a = 3.14159265f * (1.f + float(i) / 12.f);  // left to right over the top
+                outline.push_back(P(12 + 5.5f * std::cos(a), 10 + 5.5f * std::sin(a)));
+            }
+            outline.push_back(P(17.5f, 15));
+            outline.push_back(P(19.5f, 17.5f));
+            outline.push_back(P(4.5f, 17.5f));
+            outline.push_back(P(6.5f, 15));
+            outline.push_back(outline.front());
+            for (size_t i = 1; i < outline.size(); ++i) p.stroke_line(outline[i - 1], outline[i], stroke);
+            p.circle(ox + 12 * s, oy + 20.5f * s, 1.8f * s);
+            p.circle(ox + 12 * s, oy + 3.3f * s, 1.2f * s);
+            break;
+        }
+        case Icon::Mic: {  // capsule, cradle and stand
+            Rect cap{ox + 8.5f * s, oy + 2 * s, 7 * s, 12 * s};
+            p.round_rect(cap, 3.5f * s);
+            p.stroke_line(P(5.5f, 11), P(5.5f, 12.5f), stroke);
+            p.stroke_line(P(18.5f, 11), P(18.5f, 12.5f), stroke);
+            std::vector<Point> arc;
+            for (int i = 0; i <= 12; ++i) {
+                float a = 3.14159265f * float(i) / 12;
+                arc.push_back(P(12 + 6.5f * std::cos(a), 12.5f + 6.5f * std::sin(a)));
+            }
+            for (size_t i = 1; i < arc.size(); ++i) p.stroke_line(arc[i - 1], arc[i], stroke);
+            p.stroke_line(P(12, 19), P(12, 22), stroke);
+            p.stroke_line(P(8.5f, 22), P(15.5f, 22), stroke);
+            break;
+        }
+        case Icon::Phone: {  // handset
+            Point h[10] = {P(4, 3.5f), P(8.5f, 3), P(10.5f, 8), P(8, 10), P(14, 16), P(16, 13.5f), P(21, 15.5f),
+                           P(20.5f, 20), P(17, 21.5f), P(2.5f, 7)};
+            p.polygon(h, 10);
+            break;
+        }
+        case Icon::Close: {
+            p.stroke_line(P(6, 6), P(18, 18), stroke * 1.1f);
+            p.stroke_line(P(18, 6), P(6, 18), stroke * 1.1f);
             break;
         }
         case Icon::Plugin: {

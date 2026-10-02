@@ -34,7 +34,7 @@ a plugin can be written in any language that reads and writes JSON lines.
 
 For custom graphics a plugin uses the `canvas` widget: it sends draw
 operations with theme colours and touch targets, and the core still renders
-them (3.6). A pixel-buffer canvas for video can follow; the widget set is
+them (3.7). A pixel-buffer canvas for video can follow; the widget set is
 extensible.
 
 ## 2. Core lifecycle
@@ -66,20 +66,29 @@ $FACET_PLUGIN_PATH                  development: ':'-separated directories
 
 The first directory containing a given plugin id wins.
 
-### 3.2 manifest.json (API 2)
+### 3.2 manifest.json (API 3)
 
 ```json
 {
-  "id": "display-power",
-  "name": { "en": "Screen & camera", "ru": "Экран и камера" },
-  "version": "0.1.0-alpha",
-  "sdk": "0.3.0-alpha",
-  "api": 2,
-  "exec": "display-power",
-  "permissions": ["display.power", "camera"],
+  "id": "max",
+  "name": "MAX",
+  "version": "0.1.0",
+  "sdk": "0.4.0-alpha",
+  "api": 3,
+  "exec": "max",
+  "permissions": [
+    "network",
+    "notifications",
+    "background",
+    { "name": "camera", "optional": true, "transient": true,
+      "reason": { "en": "Video calls", "ru": "Видеозвонки" } },
+    { "name": "microphone", "optional": true, "transient": true },
+    "wayland.window",
+    { "name": "wayland.clipboard", "optional": true }
+  ],
   "provides": [],
-  "requires": [],
-  "settings": true
+  "requires": ["web.runtime@1", "display.wayland@1"],
+  "tile": { "icon": "chat" }
 }
 ```
 
@@ -95,7 +104,11 @@ The first directory containing a given plugin id wins.
 - `tile` (optional) puts a tile on the home screen. `settings` (optional,
   `true` or `{ "title": … }`) lists the plugin's screen under Settings >
   Modules instead or as well. A plugin may have both, one or none (keyboards).
-- `permissions` are requested; the user grants them in Settings > Apps (§3.4).
+- `permissions` are requested; the user grants them in Settings > Apps
+  (§3.4). An entry is a name (required, persistent) or an object:
+  `optional` (the plugin runs without it and must degrade gracefully),
+  `transient` (asked for at run time and held only while in use; devices
+  only) and `reason` (shown to the user).
 - `provides` / `requires` are versioned capabilities, `"name@version"`
   (version 1 when omitted). A plugin whose `requires` no enabled plugin
   `provides` with at least that version is not started ("needs …").
@@ -103,8 +116,10 @@ The first directory containing a given plugin id wins.
   only from such plugins.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
   `settings`, `warning`, `plugin`, `back`, `chevron`, `shift`, `backspace`,
-  `enter`, `gauge`, `chat`, `bell`. Unknown names show the generic plugin icon,
-  so a plugin may use icons of newer cores.
+  `enter`, `gauge`, `chat`, `bell`, `mic`, `phone`, `close`. Unknown names show
+  the generic plugin icon, so a plugin may use icons of newer cores. At run time
+  a plugin can change its icon (a built-in name or a canvas drawing on a
+  24 × 24 grid) and show a badge (e.g. an unread count).
 
 Bundled plugins live in `plugins/` of the core repository, are part of every
 core release and are installed and updated together with the core. Today this
@@ -149,13 +164,54 @@ status) and rendered in the current UI language when shown.
 
 ### 3.4 Permissions and containers
 
-| Permission | What the container gets |
-|---|---|
-| (none) | `/plugin` (its directory, read-only), `/data` (its data, read-write), `/tmp`, read-only system libraries (`/usr`, `/lib`), `/dev/null` & co, its own `/proc`; no network (own network namespace, loopback only) |
-| `network` | the host's network, `/etc/resolv.conf`, `/etc/hosts`, `/etc/ssl` |
-| `camera` | `/dev/video*`, `/dev/v4l` and the devices' group |
-| `system.stats` | read-only host `/proc`, `/sys` and the host's root file system at `/host` (system monitors) |
-| `display.power` | no files: the core accepts `display` requests and sends `activity` |
+Permissions have protection levels, as on Android: **normal** ones are
+granted without asking (listed, the user can revoke them), **dangerous** ones
+are decided by the user before the plugin first starts, **special** ones are
+dangerous ones shown with a warning (system-wide powers).
+
+| Permission | Level | Transient | What the plugin gets |
+|---|---|---|---|
+| (none) | | | `/plugin` (its directory, read-only), `/data` (its data, read-write), `/tmp`, read-only system libraries (`/usr`, `/lib`), `/dev/null` & co, its own `/proc`; no network (own network namespace, loopback only) |
+| `network` | dangerous | | the host's network, `/etc/resolv.conf`, `/etc/hosts`, `/etc/ssl` |
+| `camera` | dangerous | yes | `/dev/video*`, `/dev/v4l` |
+| `microphone` | dangerous | yes | ALSA capture nodes (`/dev/snd/pcmC*D*c`, control, timer) |
+| `audio` | normal | | ALSA playback nodes |
+| `gpu` | normal | | render nodes `/dev/dri/renderD*` |
+| `storage.downloads` | dangerous | | the shared `/shared/Downloads` (`<data>/shared/Downloads`) |
+| `system.stats` | dangerous | | read-only host `/proc`, `/sys` and the host's root file system at `/host` |
+| `notifications` | dangerous | | may post notifications and calls (§3.6) |
+| `background` | normal | | keeps running while none of its screens is open |
+| `wake_lock` | normal | | may keep the screen on |
+| `display.power` | special | | the core accepts `display` requests and sends `activity` |
+| `notifications.distributor` | special | | posts on behalf of other modules / apps, receives copies of all notifications |
+| `wayland.compositor` | special | | `/dev/dri/*`, `/dev/input/event*`: runs the display server |
+| `wayland.window` | normal | | client scope: may show windows (enforced by the compositor) |
+| `wayland.clipboard` | dangerous | | client scope: clipboard |
+| `wayland.screencopy` | dangerous | yes | client scope: screen capture |
+
+Choices are stored in the config as `permissions.<id>.<name>` = `allow`,
+`ask` (transient only) or `deny`. A plugin is not started while a dangerous
+or special permission has no choice yet ("needs permission"), or while a
+required (not optional) permission is denied. Changing a persistent
+permission restarts the plugin; optional ones it lacks are simply missing
+from `hello.permissions` and the plugin must keep working.
+
+**Transient permissions.** The plugin calls `request_permission("camera")`
+when it needs the device (e.g. a call starts). With `allow` the core grants at
+once, with `ask` it shows a dialog ("Allow this time", "Allow while in use",
+"Don't allow"), with `deny` it refuses. Granting creates the device nodes in
+the running container (`mknod` in its mount namespace, owned by the plugin's
+user); `release_permission()` or the end of the process removes them. The
+user can withdraw a grant (indicator in the top right corner → module page →
+Stop): the nodes are removed at once and a plugin that does not release
+within 5 s is restarted, which closes what it still has open.
+
+**Wayland scopes are per client.** The compositor module (provides
+`display.wayland`, permission `wayland.compositor`) has the screen and input
+devices; client modules never inherit them. The core tells the compositor
+which `wayland.*` scopes each client module was granted (`wayland_client`),
+and the compositor enforces them (the plan is one `security-context-v1`
+socket per client container).
 
 Every plugin runs in its own mount, PID, IPC and UTS namespaces (and network
 namespace without `network`) as its own unprivileged user (uids from 64000,
@@ -164,10 +220,12 @@ directory is handed over to that user (`chown`, mode 0700). Nothing of the
 core's environment is passed in: the plugin gets `FACET_PLUGIN_ID`,
 `FACET_PLUGIN_DATA=/data`, `FACET_API`, `HOME=/data`, `TMPDIR=/tmp`.
 
-A new plugin, or one that requests a new permission, is not started until the
-user has reviewed its permissions in Settings > Apps (each can be granted or
-denied); changing a permission restarts the plugin. Grants are stored in the
-config as `permissions.<id> = {granted: […], asked: […]}`.
+**Background.** A plugin with a tile or settings page and without
+`background` is paused (SIGSTOP of its whole container) 10 s after its
+screen closes and resumed when it opens again or one of its notifications is
+tapped. Settings > Apps lists plugins running in the background with what
+they say they are doing (`begin_background(reason)`), and the Wayland clients
+the compositor reports (`wayland_clients`).
 
 Containers need Facet to run as root (the service does). Otherwise, or with
 `FACET_SANDBOX=0`, plugins run as plain processes and the UI says that
@@ -175,7 +233,7 @@ permissions are not enforced. `FACET_AUTO_GRANT=1` grants everything without
 asking (development, tests; `scripts/dev.sh` sets it). Plugins that bring their
 own root file system (container images, e.g. a browser) are the next step.
 
-### 3.5 Protocol v2 (NDJSON over stdin/stdout)
+### 3.5 Protocol v3 (NDJSON over stdin/stdout)
 
 One line = one JSON object with a `t` field. The plugin's stderr goes to the
 core log prefixed with `[id]`.
@@ -195,6 +253,10 @@ Core → plugin:
 | `keyboard_show` | `mode`, `width`, `langs` | open the keyboard (`input.keyboard` only): field mode `text`/`number`, width in dp, layout languages |
 | `keyboard_key` | `hit` | a key of the keyboard's drawing was tapped |
 | `keyboard_hide` | — | the text field lost focus |
+| `permission` | `name`, `granted` | answer to `permission_request`, or a transient grant withdrawn (`granted: false`) |
+| `notification_action` | `id`, `action`, `source` | the user tapped (`open`), dismissed (`dismiss`), answered a call (`accept`/`decline`/`timeout`) or pressed a button |
+| `notification_posted` | `notification` | copy of every posted notification (subscribed distributors) |
+| `wayland_client` | `module`, `scopes`, `running` | compositor only: a client module started/stopped and its scopes |
 | `shutdown` | — | exit within 2 s |
 
 Plugin → core:
@@ -203,16 +265,47 @@ Plugin → core:
 |---|---|---|
 | `hello` | `api`, `sdk`, `id`, `version` | reply to hello |
 | `pong` | `seq` | |
-| `ui` | `root` | screen tree (3.6) |
+| `ui` | `root` | screen tree (3.7) |
 | `tile` | `subtitle` | text under the plugin's menu tile |
 | `display` | `on: bool` | desired screen state (`display.power`) |
 | `keyboard_ui` | `height`, `ops` | the keyboard's drawing: canvas ops, full screen width (`input.keyboard`) |
 | `input` | `action`, `text?` | typed input: `insert` (with `text`), `backspace`, `enter`, `hide` (`input.keyboard`) |
+| `badge` | `value` | text on the tile icon (`""` hides) |
+| `tile_icon` | `name` or `ops` | built-in icon or a canvas drawing on a 24 × 24 grid |
+| `permission_request` | `name`, `reason?` | ask for a transient permission now |
+| `permission_release` | `name` | done with a transient permission |
+| `notify` | `notification` | post or replace (`notifications`; `source`/`app_name` need `notifications.distributor`) |
+| `notify_cancel` | `id`, `source?` | withdraw a notification |
+| `notifications_subscribe` | `value` | distributors: receive `notification_posted` |
+| `background` | `value`, `reason?` | background work started / ended (shown in Settings > Apps) |
+| `wake_lock` | `value` | keep the screen on (`wake_lock`) |
+| `wayland_clients` | `clients` | compositor only: the running Wayland clients |
 
 Plugins send already-translated text: they get the language in `hello` and
 `locale`. Unknown fields are ignored, so the protocol grows compatibly.
 
-### 3.6 UI tree
+### 3.6 Notifications
+
+A notification has an `id` (posting the same id again replaces it), `title`,
+`body`, `kind` (`message`, `call`, `alarm`, `status`), `priority` (`low`,
+`normal`, `high`), an optional built-in `icon` and up to three `actions`
+(`{id, label}`). New ones appear as a banner on top of any screen for 5 s
+(not `status` / `low`) and stay in the list behind the bell in the status bar
+(at most 100, in memory). `high` wakes the screen for 10 s.
+
+A `call` covers the screen with Accept / Decline (as on a phone), keeps the
+screen on and rings until answered, cancelled or `timeout` (default 45 s).
+It is meant for native Facet clients; Wayland apps' calls come through a
+distributor.
+
+**Distributors** (`notifications.distributor`) post on behalf of other
+modules (`source`) or of apps that are no module (`app_name`, e.g. a Wayland
+client's `org.freedesktop.Notifications`), and with
+`subscribe_notifications()` receive a copy of every notification posted in
+the system, to route it elsewhere. Actions on a notification go to whoever
+posted it. Remote push servers chosen by the user are planned on top of this.
+
+### 3.7 UI tree
 
 ```json
 { "title": "Screen & camera", "items": [

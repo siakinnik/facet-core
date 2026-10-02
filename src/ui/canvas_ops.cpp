@@ -104,17 +104,17 @@ std::string draw_canvas(Context& ui, std::string_view id, const Json& node) {
     return draw_ops(ui, id, node["ops"], ui.block(height));
 }
 
-std::string draw_ops(Context& ui, std::string_view id, const Json& ops_json, const Rect& box) {
+std::string draw_ops(Context& ui, std::string_view id, const Json& ops_json, const Rect& box, float unit) {
     const Theme& t = ui.theme();
     gfx::Canvas& cv = ui.canvas();
-    auto X = [&](const Json& j, const char* k) { return box.x + t.dp(float(j[k].as_number())); };
-    auto Y = [&](const Json& j, const char* k) { return box.y + t.dp(float(j[k].as_number())); };
-    auto D = [&](const Json& j, const char* k) { return t.dp(float(j[k].as_number())); };
+    auto X = [&](const Json& j, const char* k) { return box.x + t.dp(float(j[k].as_number()) * unit); };
+    auto Y = [&](const Json& j, const char* k) { return box.y + t.dp(float(j[k].as_number()) * unit); };
+    auto D = [&](const Json& j, const char* k) { return t.dp(float(j[k].as_number()) * unit); };
     auto points = [&](const Json& j) {
         std::vector<gfx::Point> pts;
         const auto& v = j["pts"].items();
         for (size_t k = 0; k + 1 < v.size() && pts.size() < kMaxPoints; k += 2)
-            pts.push_back({box.x + t.dp(float(v[k].as_number())), box.y + t.dp(float(v[k + 1].as_number()))});
+            pts.push_back({box.x + t.dp(float(v[k].as_number()) * unit), box.y + t.dp(float(v[k + 1].as_number()) * unit)});
         return pts;
     };
 
@@ -181,7 +181,7 @@ std::string draw_ops(Context& ui, std::string_view id, const Json& ops_json, con
             cv.fill_path(p, color);
         } else if (kind == "text") {
             Rect tb{X(op, "x"), Y(op, "y"), D(op, "w"), D(op, "h")};
-            float size = std::clamp(float(op["size"].as_number(Theme::kBody)), 6.f, 400.f);
+            float size = std::clamp(float(op["size"].as_number(Theme::kBody)) * unit, 6.f, 400.f);
             FontRole role = font_of(op["font"].str());
             ui.text(role, size, tb, ui.ellipsize(role, size, op["text"].str(), tb.w + 1), color,
                     align_of(op["align"].str()));

@@ -199,6 +199,7 @@ int App::run() {
     while (!g_quit) {
         double t = now_s();
         double next = std::min(host_.next_deadline(t), t + 1.0);
+        if (banner_) next = std::min(next, banner_until_);
         std::tm tm = local_now();
         next = std::min(next, t + (60 - tm.tm_sec) + 0.05);  // minute boundary for the clock
         // A dark screen draws nothing: pending redraws wait for it to wake up
@@ -243,6 +244,7 @@ void App::run_frame(double t) {
     update_theme(false);
     ui_.begin_frame(canvas_, theme_, pointer_, t);
     ui_.set_overlay(kb_rect_);  // keyboard area of the previous frame
+    prepare_overlays(t);        // dialogs, calls and banners take precedence
     switch (view_) {
         case View::Splash: draw_splash(); break;
         case View::Menu: draw_menu(); break;
@@ -251,8 +253,10 @@ void App::run_frame(double t) {
         case View::Plugin: draw_plugin(t); break;
         case View::Apps: draw_apps(); break;
         case View::AppInfo: draw_app_info(t); break;
+        case View::Notifications: draw_notifications(t); break;
     }
     draw_keyboard();
+    draw_overlays(t);
     ui_.end_frame();
     // Keys of the built-in keyboard reach the field on the next frame.
     for (auto& [action, text] : kb_pending_) apply_key(action, text);
@@ -337,18 +341,20 @@ void App::tick(double t) {
         return;
     }
 
-    if ((view_ == View::Settings || view_ == View::Plugin || view_ == View::Apps || view_ == View::AppInfo) &&
-        t - last_input_ > kIdleToMenu)
+    if ((view_ == View::Settings || view_ == View::Plugin || view_ == View::Apps || view_ == View::AppInfo ||
+         view_ == View::Notifications) &&
+        t - last_input_ > kIdleToMenu && !modal_active(t))
         navigate(View::Menu);
     if ((view_ == View::Menu || view_ == View::Dashboard) && local_now().tm_min != drawn_minute_) dirty_ = true;
     if (net_.take_changed() && (view_ == View::Menu || view_ == View::Settings)) dirty_ = true;
+    if (banner_ && t >= banner_until_) dirty_ = true;  // take it down
     update_display(t);
 }
 
 void App::update_display(double t) {
     bool want = true;
     if (view_ != View::Splash) {
-        if (auto policy = host_.display_policy()) want = *policy;
+        if (auto policy = host_.display_policy(t)) want = *policy;
         if (t - last_touch_ < kTouchHold) want = true;
     }
     if (want == display_on_) return;

@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <sys/types.h>
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -13,6 +14,8 @@
 #include "core/config.h"
 #include "facet/i18n.h"
 #include "facet/json.h"
+#include "plugins/notifications.h"
+#include "plugins/permissions.h"
 
 namespace facet::plugins {
 
@@ -34,12 +37,21 @@ struct Capability {
     std::string str() const { return name + "@" + std::to_string(version); }
 };
 
+// One entry of the manifest's "permissions".
+struct PermissionRequest {
+    std::string name;
+    bool optional = false;   // the plugin works without it (otherwise it is not started)
+    bool transient = false;  // asked for at run time, held only while in use
+    LocalizedString reason;  // why the plugin needs it (shown to the user), may be empty
+};
+
 struct Manifest {
     std::string id, version, exec, dir;
     std::string sdk;  // SDK the plugin was built with, "" if unknown
     LocalizedString name, tile_title, settings_title;
     int api = 0;
-    std::vector<std::string> permissions;  // requested; the user grants them
+    std::vector<PermissionRequest> permissions;  // requested; the user grants them
+    const PermissionRequest* permission(const std::string& name) const;
     std::vector<Capability> provides, needs;  // "provides" / "requires" in the manifest
     std::string tile_icon;
     bool has_tile = false;      // a tile on the home screen
@@ -49,7 +61,7 @@ struct Manifest {
 };
 
 // Why a plugin is not started even though it is enabled.
-enum class Block { None, Incompatible, NeedsReview, MissingDependency };
+enum class Block { None, Incompatible, NeedsReview, MissingPermission, MissingDependency };
 
 // Why a plugin stopped, kept untranslated until shown.
 struct Failure {
@@ -65,7 +77,8 @@ struct Plugin {
     Failure error;  // last failure, shown to the user
     Block block = Block::None;
     i18n::Text block_reason;          // untranslated, shown with the block
-    std::vector<std::string> granted;  // permissions in effect for the running process
+    std::vector<std::string> granted;  // persistent permissions of the running process
+    std::vector<std::string> transient;  // transient permissions it holds right now
     bool sandboxed = false;            // the running process is in a container
     std::string sdk_reported;          // SDK version from the plugin's hello
 
@@ -88,6 +101,40 @@ struct Plugin {
     // Keyboard plugins: the drawing they last sent for the open keyboard.
     Json keyboard_ops;
     float keyboard_height = 0;
+
+    // Dynamic tile.
+    std::string badge;
+    std::string tile_icon_name;  // overrides the manifest icon when set
+    Json tile_icon_ops;          // custom drawing on a 24 x 24 grid
+
+    // Background.
+    bool frozen = false;          // suspended (no "background" permission, not on screen)
+    double hidden_since = 0;
+    std::string background_task;  // reason of the current background work, "" if none
+    bool wake_lock = false;
+    bool subscribed = false;      // distributor receiving all notifications
+    // Transient permission the user withdrew; the plugin must release it by then.
+    std::map<std::string, double> revoke_deadline;
+
+    bool holds(const std::string& perm) const;  // persistent or transient
+};
+
+// A runtime permission request waiting for the user's answer.
+struct PermissionPrompt {
+    std::string plugin, permission, reason;
+};
+
+// A Wayland client as reported by the compositor module.
+struct WaylandClient {
+    std::string module, app_id, title;
+    int pid = 0;
+    bool focused = false;
+};
+
+// A plugin that runs while none of its screens is open.
+struct BackgroundEntry {
+    std::string plugin;
+    std::string task;  // what it says it is doing, may be empty
 };
 
 class PluginHost {
@@ -115,12 +162,34 @@ public:
     bool is_enabled(const std::string& id) const;
 
     // ---- Permissions (Settings > Apps). Stored in the config as
-    // permissions.<id> = {granted: [...], asked: [...]}; a plugin starts once
-    // the user has seen every permission it requests.
-    bool permission_granted(const std::string& id, const std::string& perm) const;
-    void set_permission(const std::string& id, const std::string& perm, bool granted, double now);
-    // Marks all requested permissions as seen (with their current grants) and starts the plugin.
+    // permissions.<id>.<permission> = "allow" | "ask" | "deny". A plugin starts
+    // once every dangerous or special permission it requests has a choice.
+    Grant grant(const std::string& id, const std::string& perm) const;  // stored choice
+    // The choice shown for an unreviewed permission (required: allow,
+    // optional: deny, transient: ask; normal permissions: allow).
+    static Grant default_grant(const PermissionRequest& r);
+    Grant shown_grant(const std::string& id, const PermissionRequest& r) const;
+    void set_grant(const std::string& id, const std::string& perm, Grant g, double now);
+    // Stores the shown choice for every unreviewed permission and starts the plugin.
     void confirm_permissions(const std::string& id, double now);
+
+    // Runtime requests of transient permissions waiting for the user.
+    const PermissionPrompt* pending_prompt() const;
+    // allow: this time; always: also from now on without asking.
+    void answer_prompt(bool allow, bool always, double now);
+    // The user stops a transient grant (e.g. the camera indicator).
+    void revoke_transient(const std::string& id, const std::string& perm, double now);
+
+    // ---- Notifications.
+    NotificationCenter& notifications() { return notifications_; }
+    // The user acted on a notification: "open", "dismiss", "accept", "decline" or a button id.
+    void notification_action(uint64_t serial, const std::string& action, double now);
+    // Until when the screen must stay on for a new notification or a call.
+    double wake_until() const { return wake_until_; }
+
+    // ---- Registries shown in Settings > Apps.
+    std::vector<BackgroundEntry> background_registry() const;
+    const std::vector<WaylandClient>& wayland_clients() const { return wayland_clients_; }
     // Enabled plugins that are blocked or failed and need the user.
     int attention_count() const;
     // Plugins run in containers (Facet runs as root, FACET_SANDBOX != 0).
@@ -135,8 +204,9 @@ public:
     void set_timezone(const std::string& zone);  // "" = system zone
     void set_content_width(int dp);              // width of canvas widgets
 
-    // Screen policy from a running plugin with display.power, if any.
-    std::optional<bool> display_policy() const;
+    // Screen policy from a running plugin with display.power, if any; wake
+    // locks and ringing calls force the screen on.
+    std::optional<bool> display_policy(double now);
 
     // ---- Keyboard plugins (provide input.keyboard).
     bool keyboard_ready(const std::string& id) const;  // running and has drawn itself
@@ -153,9 +223,17 @@ private:
     void spawn(Plugin& p, double now);
     // Recomputes every plugin's Block and starts/stops plugins accordingly.
     void refresh_blocks(double now);
-    std::vector<std::string> asked(const std::string& id) const;
-    std::vector<std::string> granted_list(const std::string& id) const;
+    // Persistent permissions the process gets at start.
+    std::vector<std::string> start_permissions(const Plugin& p) const;
     uid_t plugin_uid(const std::string& id);
+    void handle_permission_request(Plugin& p, const std::string& perm, const std::string& reason, double now);
+    void grant_transient(Plugin& p, const std::string& perm, bool granted, double now);
+    void drop_transient(Plugin& p, const std::string& perm);
+    void handle_notify(Plugin& p, const Json& msg, double now);
+    void freeze(Plugin& p, bool on, double now);
+    void reset_runtime(Plugin& p);
+    void tell_compositor(Plugin& client, bool running);
+    Plugin* compositor();
     void send(Plugin& p, const Json& msg);
     void flush(Plugin& p);
     void read_pipes(Plugin& p, double now);
@@ -174,6 +252,10 @@ private:
     int content_width_ = 440;
     std::vector<InputAction> input_;
     bool changed_ = true;
+    std::deque<PermissionPrompt> prompts_;
+    NotificationCenter notifications_;
+    double wake_until_ = 0;
+    std::vector<WaylandClient> wayland_clients_;
 };
 
 }  // namespace facet::plugins

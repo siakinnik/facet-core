@@ -19,7 +19,9 @@ takes the panel down.
   and repository, shown on the splash, the menu and in Settings, and by
   `facet --version`.
 - Plugins: out-of-process, each in its own container as its own user, with
-  Android-like permissions (Settings > Apps), watchdog-supervised, fail-safe. See
+  Android-like permissions (optional ones, "while in use" device access),
+  notifications with banners and incoming calls, badges, background limits;
+  watchdog-supervised, fail-safe. See
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Status: **alpha** (0.0.1-alpha).
@@ -66,7 +68,7 @@ Available plugins:
 |---|---|
 | [facet-display-power](https://github.com/siakinnik/facet-display-power) | screen on/off by schedule, touch and camera presence |
 | [facet-sysmon](https://github.com/siakinnik/facet-sysmon) | CPU, memory, temperatures, disks, network, top processes |
-| [facet-telegram](https://github.com/siakinnik/facet-telegram) | unread messages from private Telegram chats (read only) |
+| [facet-telegram-dm-notif](https://github.com/siakinnik/facet-telegram-dm-notif) | unread messages from private Telegram chats (read only) |
 -->
 
 `--remove-plugin <id>` removes one. A plugin release is an archive named
@@ -176,8 +178,10 @@ scripts/check_i18n.py     # fails on non-English text outside i18n/ directories
 ```
 
 `examples/pinpad` is a small plugin (a PIN pad drawn with the canvas widget)
-that doubles as a template for new plugins; it is built with the core and
-loaded with `FACET_PLUGIN_PATH=build/examples`.
+that doubles as a template for new plugins; `examples/showcase` shows the
+API 3 features (notifications, an incoming call, the camera "while in use", a
+badge, a wake lock, background work). Both are built with the core and loaded
+with `FACET_PLUGIN_PATH=build/examples`.
 
 In the X11 window the mouse acts as a finger and `q` quits. The headless
 backend replays `FACET_SCRIPT` (`tap x y`, `wait s`, `shot file.ppm`, ...).

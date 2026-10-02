@@ -1,9 +1,9 @@
 {
   "id": "keyboard",
   "name": { "en": "Keyboard", "ru": "Клавиатура" },
-  "version": "0.2.0",
-  "api": 2,
+  "version": "0.3.0",
+  "api": 3,
   "exec": "keyboard",
-  "permissions": [],
+  "permissions": ["background"],
   "provides": ["input.keyboard@1"]
 }

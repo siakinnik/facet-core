@@ -126,7 +126,7 @@ private:
 }  // namespace
 
 int main() {
-    Plugin plugin("example-pinpad", "0.0.1");
+    Plugin plugin("example-pinpad", "0.0.3");  // keep in sync with manifest.json
     example::register_translations(plugin.catalog());
     PinPad app(plugin);
     plugin.on_hello = [&](const Json&) { app.refresh(); };

@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -311,6 +312,140 @@ void Plugin::input(const std::string& action, const std::string& text) {
     send(msg);
 }
 
+bool Plugin::has_permission(const std::string& name) const {
+    return std::find(permissions_.begin(), permissions_.end(), name) != permissions_.end();
+}
+
+void Plugin::set_badge(int count) { set_badge(count > 0 ? (count > 999 ? "999+" : std::to_string(count)) : ""); }
+
+void Plugin::set_badge(const std::string& text) {
+    Json value(text);
+    if (value == last_badge_) return;
+    last_badge_ = value;
+    Json msg = Json::object();
+    msg["t"] = "badge";
+    msg["value"] = text;
+    send(msg);
+}
+
+void Plugin::set_tile_icon(const std::string& builtin) {
+    Json value(builtin);
+    if (value == last_icon_) return;
+    last_icon_ = value;
+    Json msg = Json::object();
+    msg["t"] = "tile_icon";
+    msg["name"] = builtin;
+    send(msg);
+}
+
+void Plugin::set_tile_icon(const Canvas& icon) {
+    if (icon.ops() == last_icon_) return;
+    last_icon_ = icon.ops();
+    Json msg = Json::object();
+    msg["t"] = "tile_icon";
+    msg["ops"] = icon.ops();
+    send(msg);
+}
+
+void Plugin::request_permission(const std::string& name, const std::string& reason) {
+    Json msg = Json::object();
+    msg["t"] = "permission_request";
+    msg["name"] = name;
+    if (!reason.empty()) msg["reason"] = reason;
+    send(msg);
+}
+
+void Plugin::release_permission(const std::string& name) {
+    permissions_.erase(std::remove(permissions_.begin(), permissions_.end(), name), permissions_.end());
+    Json msg = Json::object();
+    msg["t"] = "permission_release";
+    msg["name"] = name;
+    send(msg);
+}
+
+Json Notification::to_json() const {
+    Json j = Json::object();
+    j["id"] = id;
+    j["title"] = title;
+    j["body"] = body;
+    j["kind"] = kind;
+    j["priority"] = priority;
+    if (!icon.empty()) j["icon"] = icon;
+    Json acts = Json::array();
+    for (const auto& [aid, label] : actions) {
+        Json a = Json::object();
+        a["id"] = aid;
+        a["label"] = label;
+        acts.push_back(a);
+    }
+    j["actions"] = acts;
+    if (timeout_s > 0) j["timeout"] = timeout_s;
+    if (!source.empty()) j["source"] = source;
+    if (!app_name.empty()) j["app_name"] = app_name;
+    return j;
+}
+
+void Plugin::notify(const Notification& n) {
+    Json msg = Json::object();
+    msg["t"] = "notify";
+    msg["notification"] = n.to_json();
+    send(msg);
+}
+
+void Plugin::cancel_notification(const std::string& id, const std::string& source) {
+    Json msg = Json::object();
+    msg["t"] = "notify_cancel";
+    msg["id"] = id;
+    if (!source.empty()) msg["source"] = source;
+    send(msg);
+}
+
+void Plugin::subscribe_notifications(bool on) {
+    Json msg = Json::object();
+    msg["t"] = "notifications_subscribe";
+    msg["value"] = on;
+    send(msg);
+}
+
+void Plugin::begin_background(const std::string& reason) {
+    Json msg = Json::object();
+    msg["t"] = "background";
+    msg["value"] = true;
+    msg["reason"] = reason;
+    send(msg);
+}
+
+void Plugin::end_background() {
+    Json msg = Json::object();
+    msg["t"] = "background";
+    msg["value"] = false;
+    send(msg);
+}
+
+void Plugin::wake_lock(bool on) {
+    Json msg = Json::object();
+    msg["t"] = "wake_lock";
+    msg["value"] = on;
+    send(msg);
+}
+
+void Plugin::report_wayland_clients(const std::vector<WaylandClient>& clients) {
+    Json list = Json::array();
+    for (const auto& c : clients) {
+        Json j = Json::object();
+        j["module"] = c.module;
+        j["app_id"] = c.app_id;
+        j["title"] = c.title;
+        j["pid"] = c.pid;
+        j["focused"] = c.focused;
+        list.push_back(j);
+    }
+    Json msg = Json::object();
+    msg["t"] = "wayland_clients";
+    msg["clients"] = list;
+    send(msg);
+}
+
 void Plugin::request_display(bool on) {
     if (last_display_ == int(on)) return;
     last_display_ = int(on);
@@ -324,6 +459,8 @@ void Plugin::handle(const Json& msg) {
     const std::string& t = msg["t"].str();
     if (t == "hello") {
         if (msg["data_dir"].is_string()) data_dir_ = msg["data_dir"].str();
+        permissions_.clear();
+        for (const auto& p : msg["permissions"].items()) permissions_.push_back(p.str());
         catalog_.set_language(i18n::normalize(msg["locale"].str()));
         if (msg["timezone"].is_string()) apply_timezone(msg["timezone"].str());
         content_width_ = msg["content_width"].as_int(content_width_);
@@ -342,6 +479,20 @@ void Plugin::handle(const Json& msg) {
             send(ui);
         }
         if (on_hello) on_hello(msg);
+    } else if (t == "permission") {
+        const std::string& name = msg["name"].str();
+        bool granted = msg["granted"].as_bool();
+        permissions_.erase(std::remove(permissions_.begin(), permissions_.end(), name), permissions_.end());
+        if (granted) permissions_.push_back(name);
+        if (on_permission) on_permission(name, granted);
+    } else if (t == "notification_action") {
+        if (on_notification_action) on_notification_action(msg["id"].str(), msg["action"].str());
+    } else if (t == "notification_posted") {
+        if (on_notification_posted) on_notification_posted(msg["notification"]);
+    } else if (t == "wayland_client") {
+        std::vector<std::string> scopes;
+        for (const auto& s : msg["scopes"].items()) scopes.push_back(s.str());
+        if (on_wayland_client) on_wayland_client(msg["module"].str(), scopes, msg["running"].as_bool());
     } else if (t == "ping") {
         Json reply = Json::object();
         reply["t"] = "pong";

@@ -11,11 +11,23 @@
 
 namespace facet::plugins::sandbox {
 
-// Permissions the sandbox knows how to grant.
+// Permissions with an effect on the container or the core's protocol.
 constexpr const char* kCamera = "camera";
+constexpr const char* kMicrophone = "microphone";
+constexpr const char* kAudio = "audio";
+constexpr const char* kGpu = "gpu";
+constexpr const char* kDownloads = "storage.downloads";
 constexpr const char* kNetwork = "network";
 constexpr const char* kSystemStats = "system.stats";
 constexpr const char* kDisplayPower = "display.power";
+constexpr const char* kNotifications = "notifications";
+constexpr const char* kDistributor = "notifications.distributor";
+constexpr const char* kBackground = "background";
+constexpr const char* kWakeLock = "wake_lock";
+constexpr const char* kCompositor = "wayland.compositor";
+
+// Host device nodes a permission gives access to (camera: /dev/video*, ...).
+std::vector<std::string> device_nodes(const std::string& permission);
 
 struct Spec {
     std::string id;
@@ -41,5 +53,15 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd);
 
 // Exit code of a child that could not set up its container.
 constexpr int kSetupFailed = 125;
+
+// Transient permissions: creates (or removes) the permission's device nodes
+// in the running container of `pid`, owned by the plugin's user. Returns an
+// English error, empty on success.
+std::string attach_devices(pid_t pid, uid_t uid, const std::string& permission);
+std::string detach_devices(pid_t pid, const std::string& permission);
+
+// Sends `sig` to every process of the plugin: its container (PID namespace
+// of `pid`) or, without containers, its process group.
+void signal_all(pid_t pid, bool sandboxed, int sig);
 
 }  // namespace facet::plugins::sandbox

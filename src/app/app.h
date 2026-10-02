@@ -23,7 +23,7 @@ public:
     int run();
 
 private:
-    enum class View { Splash, Menu, Dashboard, Settings, Plugin, Apps, AppInfo };
+    enum class View { Splash, Menu, Dashboard, Settings, Plugin, Apps, AppInfo, Notifications };
 
     bool init();
     bool load_fonts();
@@ -53,6 +53,21 @@ private:
     void draw_apps();
     void draw_app_info(double t);
     void leave_plugin();
+
+    // Overlays and notifications (overlays.cpp).
+    void prepare_overlays(double t);
+    void draw_overlays(double t);
+    bool modal_active(double t);
+    gfx::Rect banner_rect() const;
+    void draw_indicators();
+    void draw_permission_prompt(const plugins::PermissionPrompt& q, double t);
+    void draw_call(plugins::Notification& n, double t);
+    void draw_banner(double t);
+    void draw_notifications(double t);
+    void open_module(const std::string& id);
+    std::string module_name(const std::string& id) const;
+    std::string notification_app(const plugins::Notification& n) const;
+    ui::Icon notification_icon(const plugins::Notification& n) const;
 
     // On-screen keyboard (keyboard.cpp).
     void draw_keyboard();
@@ -96,6 +111,8 @@ private:
     double last_input_ = 0, last_touch_ = 0, last_activity_sent_ = 0;
 
     std::string ip_cache_;
+    std::optional<plugins::Notification> banner_;  // shown at the top until banner_until_
+    double banner_until_ = 0;
     // Region picked in Settings while its city is not chosen yet.
     std::optional<std::string> tz_region_pending_;
 

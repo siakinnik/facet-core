@@ -1,5 +1,7 @@
 #include "ui/context.h"
 
+#include "ui/canvas_ops.h"
+
 #include <cmath>
 #include <cstdio>
 
@@ -204,7 +206,10 @@ HeaderHit Context::begin_screen(std::string_view id, std::string_view title, boo
     text(FontRole::Medium, Theme::kTitle, {x, 0, W - x - gut - touch, hh}, title, c.text);
 
     // Scrolling content.
-    float bottom = overlay_.empty() ? H : std::min(H, overlay_.y);
+    // Only an overlay docked at the bottom (the keyboard) shortens the
+    // viewport; banners on top and full-screen dialogs only cover it.
+    bool docked = !overlay_.empty() && overlay_.y > 0 && overlay_.bottom() >= H - 1;
+    float bottom = docked ? std::min(H, overlay_.y) : H;
     viewport_ = {0, hh, W, std::max(0.f, bottom - hh)};
     Scroll& s = scroll_[screen_];
     float max_scroll = std::max(0.f, s.content_h - viewport_.h);
@@ -628,7 +633,7 @@ Context::TextResult Context::text_field(std::string_view id, std::string_view la
 // ------------------------------------------------------------------ free layout
 
 bool Context::tile(std::string_view id, const Rect& r, std::string_view title, std::string_view subtitle, Icon icon,
-                   Tone tone) {
+                   Tone tone, std::string_view badge, const Json* icon_ops) {
     const Theme& t = *theme_;
     const Palette& c = t.c;
     Press pr = interact(make_id(id), r);
@@ -638,7 +643,16 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     float cr = t.dp(30);
     canvas_->fill_circle(r.x + pad + cr, r.y + pad + cr, cr, ic.alpha(0.16f));
     float is = t.dp(32);
-    draw_icon(*canvas_, icon, {r.x + pad + cr - is / 2, r.y + pad + cr - is / 2, is, is}, ic);
+    Rect ib{r.x + pad + cr - is / 2, r.y + pad + cr - is / 2, is, is};
+    if (icon_ops && icon_ops->is_array()) draw_ops(*this, std::string(id) + "\x1ficon", *icon_ops, ib, 32.f / 24.f);
+    else draw_icon(*canvas_, icon, ib, ic);
+    if (!badge.empty()) {
+        float bh = t.dp(26), bw = std::max(bh, text_width(FontRole::Medium, Theme::kSmall, badge) + t.dp(16));
+        Rect b{r.x + pad + 2 * cr - bw * 0.55f, r.y + pad - t.dp(4), bw, bh};
+        canvas_->fill_round_rect(b.inset(-t.dp(2)), bh / 2 + t.dp(2), c.surface);  // gap to the icon
+        canvas_->fill_round_rect(b, bh / 2, c.bad);
+        text(FontRole::Medium, Theme::kSmall, b, badge, Color{255, 255, 255, 255}, Align::Center);
+    }
 
     float inner = r.w - 2 * pad;
     float sub_h = subtitle.empty() ? 0 : t.dp(24);

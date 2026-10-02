@@ -19,6 +19,7 @@ gfx::Color color_from(const Theme& theme, std::string_view value, gfx::Color fal
 std::string draw_canvas(Context& ui, std::string_view id, const Json& node);
 
 // Draws `ops` inside `box` (e.g. a keyboard overlay). Returns the tapped hit id.
-std::string draw_ops(Context& ui, std::string_view id, const Json& ops, const gfx::Rect& box);
+// `unit`: dp per op unit (e.g. 32 dp / 24 for a tile icon drawn on a 24 x 24 grid).
+std::string draw_ops(Context& ui, std::string_view id, const Json& ops, const gfx::Rect& box, float unit = 1.f);
 
 }  // namespace facet::ui
