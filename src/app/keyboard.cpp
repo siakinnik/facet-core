@@ -46,7 +46,8 @@ void App::draw_keyboard() {
                                               : host_.find(surface_owner)->text_mode == "number";
     const bool secure = surface_owner.empty() && ui_.focus().secure;
     const uint64_t field = surface_owner.empty() ? ui_.focus().id
-                                                 : (uint64_t(1) << 63) | std::hash<std::string>{}(surface_owner);
+                                                 : (uint64_t(1) << 63) | std::hash<std::string>{}(
+                                                       surface_owner + (number ? "#number" : "#text"));
     const std::string want = secure ? std::string() : keyboard_plugin();
     const float W = float(canvas_.width()), H = float(canvas_.height());
     const float width_dp = W / theme_.scale;
