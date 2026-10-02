@@ -1,7 +1,7 @@
 {
   "id": "example-showcase",
   "name": { "en": "SDK showcase", "ru": "Демо SDK" },
-  "version": "0.0.1",
+  "version": "0.0.2",
   "api": 3,
   "exec": "showcase",
   "permissions": [
@@ -9,6 +9,7 @@
     { "name": "camera", "optional": true, "transient": true,
       "reason": { "en": "To show transient access.", "ru": "Чтобы показать временный доступ." } },
     "wake_lock",
+    { "name": "display.surface", "optional": true },
     "background"
   ],
   "tile": { "icon": "bell" }

@@ -110,6 +110,15 @@ std::string permission_text(const std::string& perm) {
 std::string block_text(const plugins::Plugin& p) {
     if (p.block == plugins::Block::MissingPermission && !p.block_reason.args.empty())
         return tr("Needs the “{}” permission.", {permission_title(p.block_reason.args[0])});
+    if (p.block == plugins::Block::MissingDependency && !p.block_reason.args.empty()) {
+        const auto& a = p.block_reason.args;
+        std::string text = tr("Needs “{}”, which no installed module provides.", {a[0]});
+        if (a.size() > 1 && !a[1].empty())
+            text += " " + tr("Install the module that provides it: {}", {a[1]});
+        else
+            text += " " + tr("Install a module that provides it.");
+        return text;
+    }
     return tr(p.block_reason);
 }
 
@@ -571,11 +580,18 @@ void App::draw_app_info(double t) {
 
     if (!p->m.provides.empty() || !p->m.needs.empty()) {
         ui_.section(tr("Dependencies"));
-        std::vector<std::string> prov, req;
+        std::vector<std::string> prov;
         for (const auto& c : p->m.provides) prov.push_back(c.str());
-        for (const auto& c : p->m.needs) req.push_back(c.str());
         if (!prov.empty()) ui_.info(tr("Provides"), join(prov));
-        if (!req.empty()) ui_.info(tr("Requires"), join(req));
+        for (const auto& c : p->m.needs) {
+            std::string provider;
+            for (const auto& q : host_.plugins())
+                if (q.get() != p && q->m.compatible() && host_.is_enabled(q->m.id))
+                    for (const auto& pc : q->m.provides)
+                        if (pc.name == c.name && pc.version >= c.version) provider = q->m.name.get(lang);
+            ui_.info(tr("Requires {}", {c.str()}), provider.empty() ? tr("missing") : provider,
+                     provider.empty() ? ui::Tone::Bad : ui::Tone::Good);
+        }
     }
     ui_.end_screen();
 }
@@ -584,6 +600,10 @@ void App::draw_app_info(double t) {
 // screens. Changes are applied locally at once, then sent as events.
 void App::render_plugin_ui(plugins::Plugin& p) {
     const Json& root = p.ui;
+    if (root["fullscreen"].is_string() && p.surface(root["fullscreen"].str())) {
+        draw_fullscreen_surface(p, root["fullscreen"].str());
+        return;
+    }
     std::string title = root["title"].as_string(p.m.name.get(catalog().language()));
     if (ui_.begin_screen("plugin:" + p.m.id, title) == ui::HeaderHit::Back) {
         leave_plugin();
@@ -647,6 +667,14 @@ void App::render_plugin_ui(plugins::Plugin& p) {
                 host_.send_event(p.m.id, id, v);
             }
             if (r.submitted) host_.send_event(p.m.id, id, v, "submit");
+        } else if (type == "surface") {
+            const plugins::SurfaceBuffer* sb = p.surface(id);
+            float h_dp = float(ci["height"].as_number(0));
+            if (h_dp <= 0) {
+                float cw = ui::Context::content_width_dp(theme_, float(canvas_.width()));
+                h_dp = sb ? cw * float(sb->h) / float(sb->w) : cw * 9.f / 16.f;
+            }
+            draw_surface(p, id, ui_.block(std::clamp(h_dp, 1.f, 4000.f)));
         } else if (type == "canvas") {
             std::string hit = ui::draw_canvas(ui_, id, ci);
             if (!hit.empty()) host_.send_event(p.m.id, id, hit);
@@ -659,6 +687,71 @@ void App::render_plugin_ui(plugins::Plugin& p) {
         }
     }
     ui_.end_screen();
+}
+
+// ------------------------------------------------------------------ surfaces
+
+void App::draw_surface(plugins::Plugin& p, const std::string& id, const Rect& r) {
+    const plugins::SurfaceBuffer* sb = p.surface(id);
+    if (!sb) {
+        ui_.canvas().fill_round_rect(r, theme_.dp(Theme::kRadius), theme_.c.surface);
+        return;
+    }
+    ui_.canvas().draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, r);
+    track_surface_touch(p, id, r.intersect(ui_.canvas().clip()), sb->w, sb->h, false);
+}
+
+// The plugin's pixels on the whole screen. The top edge stays Facet's: a
+// swipe down from it goes back, so a full-screen plugin can never trap the user.
+void App::draw_fullscreen_surface(plugins::Plugin& p, const std::string& id) {
+    const plugins::SurfaceBuffer* sb = p.surface(id);
+    const Theme& t = theme_;
+    float W = float(canvas_.width()), H = float(canvas_.height());
+    canvas_.fill_rect({0, 0, W, H}, gfx::Color{0, 0, 0, 255});
+    canvas_.draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, {0, 0, W, H});
+    float pw = t.dp(56), ph = t.dp(5);
+    canvas_.fill_round_rect({(W - pw) / 2, t.dp(6), pw, ph}, ph / 2, gfx::Color{255, 255, 255, 110});
+    track_surface_touch(p, id, {0, 0, W, H}, sb->w, sb->h, true);
+}
+
+void App::track_surface_touch(plugins::Plugin& p, const std::string& id, const Rect& r, int sw, int sh,
+                              bool fullscreen) {
+    if (r.empty()) return;
+    const float edge = theme_.dp(28), swipe = float(canvas_.height()) * 0.12f;
+    auto to_surface = [&](float& x, float& y) {
+        x = std::clamp((pointer_.x - r.x) * float(sw) / r.w, 0.f, float(sw - 1));
+        y = std::clamp((pointer_.y - r.y) * float(sh) / r.h, 0.f, float(sh - 1));
+    };
+    if (pointer_.pressed && !touch_.active && r.contains(pointer_.x, pointer_.y) &&
+        !ui_.overlay().contains(pointer_.x, pointer_.y)) {
+        touch_ = {true, fullscreen && pointer_.y < edge, p.m.id, id, pointer_.y, -1, -1};
+        if (!touch_.gesture) {
+            float x, y;
+            to_surface(x, y);
+            host_.send_touch(p.m.id, id, "down", x, y);
+            touch_.last_x = x, touch_.last_y = y;
+        }
+        return;
+    }
+    if (!touch_.active || touch_.plugin != p.m.id || touch_.surface != id) return;
+    if (touch_.gesture) {
+        if (pointer_.down && pointer_.y - touch_.start_y > swipe) {
+            touch_ = {};
+            leave_plugin();
+        } else if (!pointer_.down) {
+            touch_ = {};
+        }
+        return;
+    }
+    float x, y;
+    to_surface(x, y);
+    if (pointer_.down) {
+        if (x != touch_.last_x || y != touch_.last_y) host_.send_touch(p.m.id, id, "move", x, y);
+        touch_.last_x = x, touch_.last_y = y;
+    } else {
+        host_.send_touch(p.m.id, id, "up", x, y);
+        touch_ = {};
+    }
 }
 
 }  // namespace facet

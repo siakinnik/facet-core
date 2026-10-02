@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -106,7 +108,12 @@ bool load_manifest(const std::string& dir, Manifest& m) {
         if (!r.name.empty() && !m.permission(r.name)) m.permissions.push_back(std::move(r));
     }
     for (const auto& c : j["provides"].items()) m.provides.push_back(parse_capability(c.str()));
-    for (const auto& c : j["requires"].items()) m.needs.push_back(parse_capability(c.str()));
+    for (const auto& c : j["requires"].items()) {
+        // "name@version" or {"name": "name@version", "install": "owner/repo"}
+        Capability cap = parse_capability(c.is_string() ? c.str() : c["name"].str());
+        cap.install = c["install"].str();
+        if (!cap.name.empty()) m.needs.push_back(std::move(cap));
+    }
     if (j["tile"].is_object()) {
         m.has_tile = true;
         m.tile_title = j["tile"]["title"].is_null() ? m.name : LocalizedString::from(j["tile"]["title"], m.id);
@@ -187,6 +194,11 @@ const PermissionRequest* Manifest::permission(const std::string& name) const {
 bool Plugin::holds(const std::string& perm) const {
     return std::find(granted.begin(), granted.end(), perm) != granted.end() ||
            std::find(transient.begin(), transient.end(), perm) != transient.end();
+}
+
+const SurfaceBuffer* Plugin::surface(const std::string& id) const {
+    auto it = surfaces.find(id);
+    return it == surfaces.end() || it->second.current < 0 ? nullptr : &it->second;
 }
 
 bool Manifest::provides_cap(const std::string& cap) const {
@@ -375,7 +387,7 @@ void PluginHost::refresh_blocks(double now) {
                 });
                 if (!found) {
                     block = Block::MissingDependency;
-                    reason = {"Needs “{}”, which no installed module provides.", {need.str()}};
+                    reason = {"Needs “{}”, which no installed module provides.", {need.str(), need.install}};
                     break;
                 }
             }
@@ -448,6 +460,15 @@ void PluginHost::spawn(Plugin& p, double now) {
 
     pid_t pid;
     std::string plugin_data = p.sandboxed ? "/data" : data_dir;
+    // Shared memory for surfaces: optional, a plugin without it still runs.
+    bool surfaces_ok = contains(p.granted, sandbox::kSurface) &&
+                       sandbox::prepare_surface_dir(p.m.id, p.sandboxed ? spec.uid : 0);
+    if (!surfaces_ok && contains(p.granted, sandbox::kSurface))
+        log::warn("plugins: %s: no surface directory", p.m.id.c_str());
+    if (p.sandboxed && surfaces_ok) spec.surface_dir = sandbox::surface_dir(p.m.id);
+    std::string plugin_surfaces = !surfaces_ok          ? std::string()
+                                  : p.sandboxed         ? std::string(sandbox::kSurfaceDirInContainer)
+                                                        : sandbox::surface_dir(p.m.id);
     if (p.sandboxed) {
         // A clean environment: nothing of Facet's leaks into the container.
         spec.env = {"FACET_PLUGIN_ID=" + p.m.id, "FACET_PLUGIN_DATA=/data",
@@ -526,6 +547,9 @@ void PluginHost::spawn(Plugin& p, double now) {
     hello["api"] = sdk::kApiVersion;
     hello["data_dir"] = plugin_data;
     hello["permissions"] = string_array(p.granted);
+    hello["surface_dir"] = plugin_surfaces;
+    hello["screen"]["w"] = screen_w_;
+    hello["screen"]["h"] = screen_h_;
     hello["theme"] = theme_;
     hello["locale"] = locale_;
     hello["timezone"] = timezone_;
@@ -554,6 +578,8 @@ void PluginHost::reset_runtime(Plugin& p) {
         wayland_clients_.clear();
         changed_ = true;
     }
+    unmap_surfaces(p);
+    p.text_input = false;
     p.transient.clear();
     p.revoke_deadline.clear();
     p.frozen = false;
@@ -799,6 +825,17 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
                 changed_ = true;
             }
         }
+    } else if (t == "surface" || t == "surface_frame" || t == "surface_destroy") {
+        if (!p.holds(sandbox::kSurface)) {
+            log::warn("plugins: %s: surface without the display.surface permission", p.m.id.c_str());
+            return;
+        }
+        handle_surface(p, msg);
+    } else if (t == "text_input") {
+        if (!p.holds(sandbox::kSurface)) return;
+        p.text_input = msg["active"].as_bool();
+        p.text_mode = msg["mode"].str() == "number" ? "number" : "text";
+        changed_ = true;
     } else if (t == "badge") {
         std::string b = msg["value"].str();
         if (b.size() > 8) b.resize(8);
@@ -1055,6 +1092,41 @@ void PluginHost::set_content_width(int dp) {
         if (p->state == State::Running) send(*p, msg);
 }
 
+void PluginHost::set_screen_size(int w, int h) {
+    if (w == screen_w_ && h == screen_h_) return;
+    screen_w_ = w;
+    screen_h_ = h;
+    Json msg = Json::object();
+    msg["t"] = "layout";
+    msg["content_width"] = content_width_;
+    msg["screen"]["w"] = w;
+    msg["screen"]["h"] = h;
+    for (auto& p : plugins_)
+        if (p->state == State::Running) send(*p, msg);
+}
+
+void PluginHost::send_touch(const std::string& id, const std::string& surface, const char* kind, float x, float y) {
+    Plugin* p = find(id);
+    if (!p || p->state != State::Running || p->frozen) return;
+    Json msg = Json::object();
+    msg["t"] = "touch";
+    msg["surface"] = surface;
+    msg["kind"] = kind;
+    msg["x"] = std::round(x * 10) / 10;
+    msg["y"] = std::round(y * 10) / 10;
+    send(*p, msg);
+}
+
+void PluginHost::send_text(const std::string& id, const std::string& action, const std::string& text) {
+    Plugin* p = find(id);
+    if (!p || p->state != State::Running) return;
+    Json msg = Json::object();
+    msg["t"] = "text";
+    msg["action"] = action;
+    if (!text.empty()) msg["text"] = text;
+    send(*p, msg);
+}
+
 void PluginHost::set_timezone(const std::string& zone) {
     if (zone == timezone_) return;
     timezone_ = zone;
@@ -1259,6 +1331,80 @@ void PluginHost::notification_action(uint64_t serial, const std::string& action,
     msg["action"] = action;
     msg["source"] = n->source;
     send(*poster, msg);
+}
+
+// ------------------------------------------------------------------ surfaces
+
+namespace {
+constexpr size_t kMaxSurfaces = 4;
+
+bool valid_surface_id(const std::string& id) {
+    if (id.empty() || id.size() > 32) return false;
+    return std::all_of(id.begin(), id.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+    });
+}
+}  // namespace
+
+void PluginHost::unmap_surfaces(Plugin& p) {
+    for (auto& [id, s] : p.surfaces)
+        if (s.map) munmap(const_cast<uint8_t*>(s.map), s.size);
+    if (!p.surfaces.empty()) changed_ = true;
+    p.surfaces.clear();
+}
+
+// The plugin's shared memory is only ever read, and only within the size
+// checked here, so a misbehaving plugin can at worst show garbage.
+void PluginHost::handle_surface(Plugin& p, const Json& msg) {
+    const std::string& t = msg["t"].str();
+    const std::string id = msg["id"].str();
+    if (!valid_surface_id(id)) return;
+    auto it = p.surfaces.find(id);
+    if (t == "surface_destroy") {
+        if (it != p.surfaces.end()) {
+            if (it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
+            p.surfaces.erase(it);
+            changed_ = true;
+        }
+        return;
+    }
+    if (t == "surface_frame") {
+        if (it == p.surfaces.end()) return;
+        int b = msg["buffer"].as_int(-1);
+        if (b < 0 || b >= it->second.buffers) return;
+        it->second.current = b;
+        Json ack = Json::object();
+        ack["t"] = "surface_shown";
+        ack["id"] = id;
+        ack["buffer"] = b;
+        send(p, ack);
+        changed_ = true;
+        return;
+    }
+    // "surface": create or replace.
+    int w = msg["w"].as_int(), h = msg["h"].as_int(), stride = msg["stride"].as_int(), buffers = msg["buffers"].as_int();
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || stride != w * 4 || buffers < 1 || buffers > 3) return;
+    if (it == p.surfaces.end() && p.surfaces.size() >= kMaxSurfaces) return;
+    std::string path = sandbox::surface_dir(p.m.id) + "/" + id + ".buf";
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        log::warn("plugins: %s: surface %s: cannot open its buffer", p.m.id.c_str(), id.c_str());
+        return;
+    }
+    struct stat st;
+    size_t need = size_t(stride) * size_t(h) * size_t(buffers);
+    void* map = MAP_FAILED;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && size_t(st.st_size) >= need)
+        map = mmap(nullptr, need, PROT_READ, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (map == MAP_FAILED) {
+        log::warn("plugins: %s: surface %s: buffer too small or not mappable", p.m.id.c_str(), id.c_str());
+        return;
+    }
+    if (it != p.surfaces.end() && it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
+    SurfaceBuffer& s = p.surfaces[id];
+    s = SurfaceBuffer{w, h, stride, buffers, -1, static_cast<const uint8_t*>(map), need};
+    changed_ = true;
 }
 
 // ------------------------------------------------------------------ background

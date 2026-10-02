@@ -1,6 +1,8 @@
 #include "facet/plugin.h"
 
+#include <fcntl.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -136,6 +138,18 @@ Screen& Screen::canvas(std::string id, float height, const Canvas& canvas) {
     return *this;
 }
 
+Screen& Screen::surface(std::string id, float height) {
+    Json& j = add("surface");
+    j["id"] = std::move(id);
+    j["height"] = height;
+    return *this;
+}
+
+Screen& Screen::fullscreen(std::string surface_id) {
+    root_["fullscreen"] = std::move(surface_id);
+    return *this;
+}
+
 // ---------------------------------------------------------------- Canvas
 
 #ifndef FACET_SDK_VERSION
@@ -211,6 +225,80 @@ Json points_json(const std::vector<float>& points) {
     return pts;
 }
 }  // namespace
+
+// ---------------------------------------------------------------- Surface
+
+bool Surface::create(Plugin& plugin, const std::string& id, int width, int height) {
+    destroy();
+    if (plugin.surface_dir_.empty() || width <= 0 || height <= 0 || width > 8192 || height > 8192) return false;
+    std::string path = plugin.surface_dir_ + "/" + id + ".buf";
+    size_t size = size_t(width) * size_t(height) * 4 * 2;  // two buffers
+    int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    if (ftruncate(fd, off_t(size)) != 0) {
+        ::close(fd);
+        return false;
+    }
+    void* map = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (map == MAP_FAILED) return false;
+    plugin_ = &plugin;
+    id_ = id;
+    w_ = width;
+    h_ = height;
+    back_ = 0;
+    waiting_ = false;
+    map_ = map;
+    size_ = size;
+    plugin.surfaces_[id] = this;
+    Json msg = Json::object();
+    msg["t"] = "surface";
+    msg["id"] = id;
+    msg["w"] = width;
+    msg["h"] = height;
+    msg["stride"] = width * 4;
+    msg["buffers"] = 2;
+    plugin.send(msg);
+    return true;
+}
+
+void Surface::destroy() {
+    if (!map_) return;
+    munmap(map_, size_);
+    map_ = nullptr;
+    if (plugin_) {
+        plugin_->surfaces_.erase(id_);
+        Json msg = Json::object();
+        msg["t"] = "surface_destroy";
+        msg["id"] = id_;
+        plugin_->send(msg);
+        ::unlink((plugin_->surface_dir_ + "/" + id_ + ".buf").c_str());
+    }
+}
+
+uint32_t* Surface::pixels() {
+    if (!map_) return nullptr;
+    return static_cast<uint32_t*>(map_) + size_t(back_) * size_t(w_) * size_t(h_);
+}
+
+void Surface::present() {
+    if (!map_ || waiting_) return;
+    Json msg = Json::object();
+    msg["t"] = "surface_frame";
+    msg["id"] = id_;
+    msg["buffer"] = back_;
+    plugin_->send(msg);
+    waiting_ = true;  // until the core has taken it
+    back_ ^= 1;
+}
+
+void Plugin::text_input(bool active, const std::string& mode) {
+    Json msg = Json::object();
+    msg["t"] = "text_input";
+    msg["active"] = active;
+    msg["mode"] = mode;
+    send(msg);
+}
 
 Canvas& Canvas::poly(std::vector<float> points, std::string color) {
     Json& j = add("poly");
@@ -461,9 +549,16 @@ void Plugin::handle(const Json& msg) {
         if (msg["data_dir"].is_string()) data_dir_ = msg["data_dir"].str();
         permissions_.clear();
         for (const auto& p : msg["permissions"].items()) permissions_.push_back(p.str());
+        surface_dir_ = msg["surface_dir"].str();
+        screen_w_ = msg["screen"]["w"].as_int();
+        screen_h_ = msg["screen"]["h"].as_int();
         catalog_.set_language(i18n::normalize(msg["locale"].str()));
         if (msg["timezone"].is_string()) apply_timezone(msg["timezone"].str());
         content_width_ = msg["content_width"].as_int(content_width_);
+        if (msg["screen"].is_object()) {
+            screen_w_ = msg["screen"]["w"].as_int(screen_w_);
+            screen_h_ = msg["screen"]["h"].as_int(screen_h_);
+        }
         Json reply = Json::object();
         reply["t"] = "hello";
         reply["api"] = kApiVersion;
@@ -485,6 +580,14 @@ void Plugin::handle(const Json& msg) {
         permissions_.erase(std::remove(permissions_.begin(), permissions_.end(), name), permissions_.end());
         if (granted) permissions_.push_back(name);
         if (on_permission) on_permission(name, granted);
+    } else if (t == "surface_shown") {
+        auto it = surfaces_.find(msg["id"].str());
+        if (it != surfaces_.end()) it->second->waiting_ = false;
+    } else if (t == "touch") {
+        if (on_touch)
+            on_touch(msg["surface"].str(), msg["kind"].str(), float(msg["x"].as_number()), float(msg["y"].as_number()));
+    } else if (t == "text") {
+        if (on_text) on_text(msg["action"].str(), msg["text"].str());
     } else if (t == "notification_action") {
         if (on_notification_action) on_notification_action(msg["id"].str(), msg["action"].str());
     } else if (t == "notification_posted") {
@@ -516,6 +619,10 @@ void Plugin::handle(const Json& msg) {
     } else if (t == "keyboard_hide") {
         if (on_keyboard_hide) on_keyboard_hide();
     } else if (t == "layout") {
+        if (msg["screen"].is_object()) {
+            screen_w_ = msg["screen"]["w"].as_int(screen_w_);
+            screen_h_ = msg["screen"]["h"].as_int(screen_h_);
+        }
         int w = msg["content_width"].as_int(content_width_);
         if (w != content_width_) {
             content_width_ = w;

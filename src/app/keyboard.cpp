@@ -25,23 +25,33 @@ std::vector<std::string> App::keyboard_langs() const {
 }
 
 void App::draw_keyboard() {
-    if (!ui_.has_focus()) {
+    // Who receives the keys: the focused text field, or the open plugin's
+    // surface while that plugin asks for text input.
+    std::string surface_owner;
+    if (!ui_.has_focus() && view_ == View::Plugin) {
+        const plugins::Plugin* p = host_.find(plugin_id_);
+        if (p && p->state == plugins::State::Running && p->text_input) surface_owner = p->m.id;
+    }
+    if (!ui_.has_focus() && surface_owner.empty()) {
         if (kb_.visible) close_keyboard();
         return;
     }
-    const ui::Context::Focus& f = ui_.focus();
-    const std::string want = f.secure ? std::string() : keyboard_plugin();
+    const bool number = surface_owner.empty() ? ui_.focus().mode == ui::InputMode::Number
+                                              : host_.find(surface_owner)->text_mode == "number";
+    const bool secure = surface_owner.empty() && ui_.focus().secure;
+    const uint64_t field = surface_owner.empty() ? ui_.focus().id
+                                                 : (uint64_t(1) << 63) | std::hash<std::string>{}(surface_owner);
+    const std::string want = secure ? std::string() : keyboard_plugin();
     const float W = float(canvas_.width()), H = float(canvas_.height());
     const float width_dp = W / theme_.scale;
 
-    if (!kb_.visible || kb_.field != f.id || kb_.plugin != want) {
+    if (!kb_.visible || kb_.field != field || kb_.plugin != want) {
         if (kb_.visible && !kb_.plugin.empty() && kb_.plugin != want) host_.keyboard_hide(kb_.plugin);
-        auto mode = f.mode == ui::InputMode::Number ? sdk::Keyboard::Mode::Number : sdk::Keyboard::Mode::Text;
+        auto mode = number ? sdk::Keyboard::Mode::Number : sdk::Keyboard::Mode::Text;
         builtin_kb_.configure(mode, keyboard_langs());
         builtin_kb_.set_labels({tr("Done"), tr("space"), "?123", "ABC"});
-        if (!want.empty())
-            host_.keyboard_show(want, f.mode == ui::InputMode::Number ? "number" : "text", width_dp, keyboard_langs());
-        kb_ = {true, f.id, want};
+        if (!want.empty()) host_.keyboard_show(want, number ? "number" : "text", width_dp, keyboard_langs());
+        kb_ = {true, field, want, surface_owner};
     }
 
     // The plugin's drawing once it has answered; the built-in one until then.
@@ -92,6 +102,10 @@ void App::close_keyboard() {
 }
 
 void App::apply_key(const std::string& action, const std::string& text) {
+    if (!kb_.surface_owner.empty()) {
+        host_.send_text(kb_.surface_owner, action, text);  // the plugin decides when to stop
+        return;
+    }
     using E = ui::Context::EditKind;
     if (action == "insert") ui_.push_edit(E::Insert, text);
     else if (action == "backspace") ui_.push_edit(E::Backspace);
@@ -103,7 +117,8 @@ void App::apply_key(const std::string& action, const std::string& text) {
 // serves the focused field, and never for secure fields.
 void App::take_plugin_input() {
     for (const auto& a : host_.take_input()) {
-        if (!kb_.visible || a.plugin != kb_.plugin || !ui_.has_focus() || ui_.focus().secure) continue;
+        if (!kb_.visible || a.plugin != kb_.plugin) continue;
+        if (kb_.surface_owner.empty() && (!ui_.has_focus() || ui_.focus().secure)) continue;
         apply_key(a.action, a.text);
         dirty_ = true;
     }

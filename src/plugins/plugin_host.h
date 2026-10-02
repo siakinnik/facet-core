@@ -34,6 +34,7 @@ struct LocalizedString {
 struct Capability {
     std::string name;
     int version = 1;
+    std::string install;  // requires only: where to get a provider ("owner/repo"), may be empty
     std::string str() const { return name + "@" + std::to_string(version); }
 };
 
@@ -69,6 +70,18 @@ struct Failure {
     int wait_status = -1;  // from waitpid(), -1 if unknown
     bool gave_up = false;  // too many crashes: no more automatic restarts
     bool empty() const { return reason.empty(); }
+};
+
+// A plugin's Surface: its shared memory, mapped read-only.
+struct SurfaceBuffer {
+    int w = 0, h = 0, stride = 0, buffers = 0;
+    int current = -1;  // buffer shown now, -1 before the first frame
+    const uint8_t* map = nullptr;
+    size_t size = 0;
+    const uint32_t* pixels() const {
+        return current < 0 ? nullptr
+                           : reinterpret_cast<const uint32_t*>(map + size_t(current) * size_t(stride) * size_t(h));
+    }
 };
 
 struct Plugin {
@@ -116,7 +129,13 @@ struct Plugin {
     // Transient permission the user withdrew; the plugin must release it by then.
     std::map<std::string, double> revoke_deadline;
 
+    // Surfaces and keyboard input for them.
+    std::map<std::string, SurfaceBuffer> surfaces;
+    bool text_input = false;
+    std::string text_mode;
+
     bool holds(const std::string& perm) const;  // persistent or transient
+    const SurfaceBuffer* surface(const std::string& id) const;
 };
 
 // A runtime permission request waiting for the user's answer.
@@ -203,6 +222,10 @@ public:
     void set_locale(const std::string& lang);
     void set_timezone(const std::string& zone);  // "" = system zone
     void set_content_width(int dp);              // width of canvas widgets
+    void set_screen_size(int w, int h);          // in pixels, for full-screen surfaces
+    // Input for a plugin's surface: a finger in surface pixels, or typed text.
+    void send_touch(const std::string& id, const std::string& surface, const char* kind, float x, float y);
+    void send_text(const std::string& id, const std::string& action, const std::string& text);
 
     // Screen policy from a running plugin with display.power, if any; wake
     // locks and ringing calls force the screen on.
@@ -232,6 +255,8 @@ private:
     void handle_notify(Plugin& p, const Json& msg, double now);
     void freeze(Plugin& p, bool on, double now);
     void reset_runtime(Plugin& p);
+    void handle_surface(Plugin& p, const Json& msg);
+    void unmap_surfaces(Plugin& p);
     void tell_compositor(Plugin& client, bool running);
     Plugin* compositor();
     void send(Plugin& p, const Json& msg);
@@ -250,6 +275,7 @@ private:
     std::string locale_ = "en";
     std::string timezone_;
     int content_width_ = 440;
+    int screen_w_ = 0, screen_h_ = 0;
     std::vector<InputAction> input_;
     bool changed_ = true;
     std::deque<PermissionPrompt> prompts_;

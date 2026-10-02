@@ -1,10 +1,14 @@
 // Example plugin: the API 3 features in one screen. Notifications and an
 // incoming call, a transient permission (the camera "while in use"), a badge
-// on the tile, a wake lock and background work. Also a template for plugins
-// that use them.
+// on the tile, a wake lock, background work, and a Surface (own pixels with
+// touches and typed text, in the page or full screen). Also a template for
+// plugins that use them.
 #include <dirent.h>
 
+#include <algorithm>
 #include <cstring>
+#include <utility>
+#include <vector>
 #include <string>
 
 #include "facet/plugin.h"
@@ -14,6 +18,7 @@ using facet::Json;
 using facet::sdk::Notification;
 using facet::sdk::Plugin;
 using facet::sdk::Screen;
+using facet::sdk::Surface;
 
 namespace {
 
@@ -32,8 +37,55 @@ class Showcase {
 public:
     explicit Showcase(Plugin& plugin) : plugin_(plugin) {}
 
+    // A finger-painting surface: a gradient, dots where it was touched.
+    void ensure_surface() {
+        if (!plugin_.has_permission("display.surface")) return;
+        int w = fullscreen_ && plugin_.screen_width() > 0 ? plugin_.screen_width() : 640;
+        int h = fullscreen_ && plugin_.screen_height() > 0 ? plugin_.screen_height() : 360;
+        if (surface_.valid() && surface_.width() == w && surface_.height() == h) return;
+        if (!surface_.create(plugin_, "paint", w, h)) return;
+        dots_.clear();
+        redraw_ = 2;  // both buffers
+    }
+
+    void tick() {
+        if (!surface_.valid() || redraw_ == 0 || !surface_.ready()) return;
+        uint32_t* px = surface_.pixels();
+        int w = surface_.width(), h = surface_.height();
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                px[y * w + x] = (uint32_t(40 + 60 * x / w) << 16) | (uint32_t(40 + 80 * y / h) << 8) | 120u;
+        for (const auto& [dx, dy] : dots_) {
+            int r = std::max(4, w / 80);
+            for (int y = std::max(0, int(dy) - r); y < std::min(h, int(dy) + r); ++y)
+                for (int x = std::max(0, int(dx) - r); x < std::min(w, int(dx) + r); ++x)
+                    if ((x - dx) * (x - dx) + (y - dy) * (y - dy) <= float(r * r)) px[y * w + x] = 0xFFFFFF;
+        }
+        surface_.present();
+        --redraw_;
+    }
+
+    void on_touch(const std::string&, const std::string& kind, float x, float y) {
+        if (kind != "up" && dots_.size() < 4000) dots_.emplace_back(x, y);
+        redraw_ = 2;
+        touches_++;
+        refresh();
+    }
+
+    void on_text(const std::string& action, const std::string& text) {
+        if (action == "insert") typed_ += text;
+        else if (action == "backspace" && !typed_.empty()) typed_.pop_back();
+        else if (action == "enter" || action == "hide") plugin_.text_input(false);
+        refresh();
+    }
+
     void on_event(const std::string& id, const Json& v) {
-        if (id == "notify") {
+        if (id == "fullscreen") {
+            fullscreen_ = true;
+            ensure_surface();
+        } else if (id == "type") {
+            plugin_.text_input(true);
+        } else if (id == "notify") {
             Notification n;
             n.id = "hello-" + std::to_string(++sent_);
             n.title = tr("Hello from the showcase");
@@ -81,6 +133,11 @@ public:
     }
 
     void refresh() {
+        if (!plugin_.visible() && fullscreen_) {  // the user swiped back
+            fullscreen_ = false;
+            plugin_.text_input(false);
+        }
+        ensure_surface();
         plugin_.set_tile(sent_ ? tr("Sent: {}", {std::to_string(sent_)}) : tr("Nothing sent yet"));
         if (plugin_.visible()) plugin_.set_ui(build());
     }
@@ -91,6 +148,19 @@ private:
 
     Screen build() const {
         Screen ui(tr("SDK showcase"));
+        if (fullscreen_ && surface_.valid()) ui.fullscreen("paint");
+
+        ui.section(tr("Own picture"));
+        if (!plugin_.has_permission("display.surface")) {
+            ui.note(tr("The “Own picture” permission is off, so there is nothing to draw on."));
+        } else {
+            ui.surface("paint");
+            ui.info(tr("Touches"), std::to_string(touches_));
+            ui.button("fullscreen", tr("Full screen (swipe down from the top to leave)"));
+            ui.button("type", tr("Type with Facet's keyboard"));
+            if (!typed_.empty()) ui.info(tr("Typed"), typed_);
+        }
+
         ui.section(tr("Notifications"));
         if (!plugin_.has_permission("notifications"))
             ui.note(tr("The notifications permission is off: nothing will appear. The plugin keeps working."));
@@ -115,6 +185,11 @@ private:
     }
 
     Plugin& plugin_;
+    Surface surface_;
+    std::vector<std::pair<float, float>> dots_;
+    int redraw_ = 0, touches_ = 0;
+    bool fullscreen_ = false;
+    std::string typed_;
     int sent_ = 0;
     bool wake_ = false, working_ = false, in_call_ = false;
     std::string status_;
@@ -123,7 +198,7 @@ private:
 }  // namespace
 
 int main() {
-    Plugin plugin("example-showcase", "0.0.1");  // keep in sync with manifest.json
+    Plugin plugin("example-showcase", "0.0.2");  // keep in sync with manifest.json
     showcase::register_translations(plugin.catalog());
     Showcase app(plugin);
     plugin.on_hello = [&](const Json&) { app.refresh(); };
@@ -131,6 +206,9 @@ int main() {
     plugin.on_permission = [&](const std::string& name, bool granted) { app.on_permission(name, granted); };
     plugin.on_notification_action = [&](const std::string& id, const std::string& a) { app.on_action(id, a); };
     plugin.on_visible = [&](bool) { app.refresh(); };
+    plugin.on_touch = [&](const std::string& s, const std::string& k, float x, float y) { app.on_touch(s, k, x, y); };
+    plugin.on_text = [&](const std::string& a, const std::string& t) { app.on_text(a, t); };
+    plugin.on_tick = [&] { app.tick(); };
     plugin.on_locale = [&](const std::string&) { app.refresh(); };
-    return plugin.run();
+    return plugin.run(30);
 }

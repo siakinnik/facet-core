@@ -191,6 +191,24 @@ std::string shared_downloads() { return paths::data_root() + "/shared/Downloads"
 
 }  // namespace
 
+std::string surface_dir(const std::string& id) {
+    // tmpfs, so frames never touch a disk: /run as root, /dev/shm otherwise.
+    if (getuid() == 0) return "/run/facet/surfaces/" + id;
+    return "/dev/shm/facet-" + std::to_string(getuid()) + "/" + id;
+}
+
+bool prepare_surface_dir(const std::string& id, uid_t uid) {
+    std::string dir = surface_dir(id);
+    if (!paths::mkdirs(dir)) return false;
+    if (DIR* d = opendir(dir.c_str())) {  // leftovers of the previous run
+        while (dirent* e = readdir(d))
+            if (e->d_name[0] != '.') unlink((dir + "/" + e->d_name).c_str());
+        closedir(d);
+    }
+    if (uid != 0 && chown(dir.c_str(), uid, uid) != 0) return false;
+    return chmod(dir.c_str(), 0700) == 0;
+}
+
 std::vector<std::string> device_nodes(const std::string& permission) {
     if (permission == kCamera) return list_dev("/dev", [](const std::string& n) { return starts_with(n, "video"); });
     // ALSA: pcmC<card>D<dev>c records, ...p plays; both need the control and timer nodes.
@@ -204,12 +222,6 @@ std::vector<std::string> device_nodes(const std::string& permission) {
         });
     if (permission == kGpu)
         return list_dev("/dev/dri", [](const std::string& n) { return starts_with(n, "renderD"); });
-    if (permission == kCompositor) {
-        auto out = list_dev("/dev/dri", [](const std::string&) { return true; });
-        auto input = list_dev("/dev/input", [](const std::string& n) { return starts_with(n, "event"); });
-        out.insert(out.end(), input.begin(), input.end());
-        return out;
-    }
     return {};
 }
 
@@ -337,6 +349,12 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
     ops.push_back({Op::Bind, spec.plugin_dir, stage + "/plugin", true, false});
     ops.push_back({Op::Dir, {}, stage + "/data"});
     ops.push_back({Op::Bind, spec.data_dir, stage + "/data", false, false});
+    if (!spec.surface_dir.empty()) {
+        ops.push_back({Op::Dir, {}, stage + "/run"});
+        ops.push_back({Op::Dir, {}, stage + "/run/facet"});
+        ops.push_back({Op::Dir, {}, stage + kSurfaceDirInContainer});
+        ops.push_back({Op::Bind, spec.surface_dir, stage + kSurfaceDirInContainer, false, false});
+    }
     ops.push_back({Op::Dir, {}, stage + "/tmp"});
     ops.push_back({Op::Tmpfs, {}, stage + "/tmp", false, false, "mode=0700,size=64m,uid=" + uid + ",gid=" + uid});
 

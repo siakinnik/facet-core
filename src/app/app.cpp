@@ -146,6 +146,7 @@ void App::update_theme(bool force) {
         theme_ = ui::Theme::make(dark, scale, &fonts_);
         host_.set_theme(dark ? "dark" : "light");
         host_.set_content_width(int(ui::Context::content_width_dp(theme_, float(canvas_.width()))));
+        host_.set_screen_size(canvas_.width(), canvas_.height());
         dirty_ = true;
     }
 }

@@ -195,6 +195,15 @@ const i18n::Table& ru() {
          "пользователя этого устройства."},
         {"Turn the screen on and off.", "Включать и выключать экран."},
         {"Unknown permission.", "Неизвестное разрешение."},
+        {"Own picture", "Своё изображение"},
+        {"Show its own picture (video, apps) and get touches and typed text for it, also over the whole screen. "
+         "Facet keeps the top edge: swipe down from it to go back.",
+         "Показывать своё изображение (видео, приложения) и получать касания и ввод текста для него, в том числе "
+         "на весь экран. Верхний край остаётся за Facet: смахните от него вниз, чтобы вернуться."},
+        {"Install the module that provides it: {}", "Установите модуль, который это даёт: {}"},
+        {"Install a module that provides it.", "Установите модуль, который это даёт."},
+        {"Requires {}", "Требует {}"},
+        {"missing", "нет"},
 
         // Permission catalog (API 3)
         {"Microphone", "Микрофон"},
@@ -216,8 +225,9 @@ const i18n::Table& ru() {
         {"Post notifications on behalf of other modules and apps, and see every notification of the system.",
          "Отправлять уведомления от имени других модулей и приложений и видеть все уведомления системы."},
         {"Display server", "Сервер отображения"},
-        {"Run the Wayland display server: full access to the screen, graphics and input devices.",
-         "Запускать сервер отображения Wayland: полный доступ к экрану, видеокарте и устройствам ввода."},
+        {"Run the Wayland display server for desktop apps: it sees their windows and the input meant for them.",
+         "Запускать сервер отображения Wayland для десктопных приложений: он видит их окна и ввод, который им "
+         "адресован."},
         {"Windows", "Окна"},
         {"Show windows of desktop apps.", "Показывать окна десктопных приложений."},
         {"Clipboard", "Буфер обмена"},

@@ -1,6 +1,9 @@
 #include "gfx/canvas.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 #include "gfx/font.h"
 #include "gfx/utf8.h"
@@ -62,6 +65,28 @@ void Canvas::fill_rect(const Rect& r, Color c) {
             float cov = cx * cy;
             if (cov > 0.f) blend(x, y, c, cov);
         }
+    }
+}
+
+void Canvas::draw_pixels(const uint32_t* src, int w, int h, int stride, const Rect& dst) {
+    if (!src || w <= 0 || h <= 0 || dst.empty()) return;
+    Rect cr = dst.intersect(clip_).intersect({0, 0, float(w_), float(h_)});
+    if (cr.empty()) return;
+    int x0 = int(std::floor(cr.x)), y0 = int(std::floor(cr.y));
+    int x1 = int(std::ceil(cr.right())), y1 = int(std::ceil(cr.bottom()));
+    float sx = float(w) / dst.w, sy = float(h) / dst.h;
+    // Source column per destination column, computed once per call.
+    std::vector<int> cols(size_t(x1 - x0));
+    for (int x = x0; x < x1; ++x) cols[size_t(x - x0)] = std::clamp(int((float(x) + 0.5f - dst.x) * sx), 0, w - 1);
+    for (int y = y0; y < y1; ++y) {
+        int srow = std::clamp(int((float(y) + 0.5f - dst.y) * sy), 0, h - 1);
+        const uint32_t* s = src + size_t(srow) * size_t(stride);
+        uint32_t* d = px_.data() + size_t(y) * size_t(w_);
+        if (w == x1 - x0 && x0 == int(dst.x) && sx == 1.f) {
+            std::memcpy(d + x0, s, size_t(w) * 4);  // 1:1 row
+            continue;
+        }
+        for (int x = x0; x < x1; ++x) d[x] = s[cols[size_t(x - x0)]];
     }
 }
 

@@ -32,6 +32,9 @@ public:
     void fill_path(const Path& p, Color c);
     void fill_round_rect(const Rect& r, float radius, Color c);
     void fill_circle(float cx, float cy, float radius, Color c);
+    // Copies an XRGB8888 image scaled into `dst` (nearest neighbour; fast
+    // enough for full-screen video), clipped. `stride` is in pixels.
+    void draw_pixels(const uint32_t* src, int w, int h, int stride, const Rect& dst);
 
     // Draws UTF-8 text with its baseline at y. Returns the advance width.
     float draw_text(Font& font, int px, float x, float baseline, std::string_view text, Color c);

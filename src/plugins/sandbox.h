@@ -25,6 +25,7 @@ constexpr const char* kDistributor = "notifications.distributor";
 constexpr const char* kBackground = "background";
 constexpr const char* kWakeLock = "wake_lock";
 constexpr const char* kCompositor = "wayland.compositor";
+constexpr const char* kSurface = "display.surface";
 
 // Host device nodes a permission gives access to (camera: /dev/video*, ...).
 std::vector<std::string> device_nodes(const std::string& permission);
@@ -37,7 +38,14 @@ struct Spec {
     uid_t uid = 0;           // the plugin's own user (and group)
     std::vector<std::string> granted;
     std::vector<std::string> env;  // "KEY=value", the complete environment
+    std::string surface_dir;       // host path, mounted read-write at /run/facet/surface
 };
+
+// Host directory (on tmpfs) where a plugin's Surface buffers live; emptied
+// and handed to `uid` (0 = leave the owner) by prepare_surface_dir().
+std::string surface_dir(const std::string& id);
+bool prepare_surface_dir(const std::string& id, uid_t uid);
+constexpr const char* kSurfaceDirInContainer = "/run/facet/surface";
 
 // True when containers can be used: Facet runs as root and FACET_SANDBOX is
 // not "0". Otherwise plugins run as plain processes (development).

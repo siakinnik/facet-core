@@ -37,6 +37,13 @@ const facet::i18n::Table& ru() {
         {"Background work", "Работа в фоне"},
         {"Permissions now", "Разрешения сейчас"},
         {"Last event", "Последнее событие"},
+        {"Own picture", "Своё изображение"},
+        {"The “Own picture” permission is off, so there is nothing to draw on.",
+         "Разрешение «Своё изображение» выключено, рисовать не на чем."},
+        {"Touches", "Касаний"},
+        {"Full screen (swipe down from the top to leave)", "На весь экран (выход — смахнуть вниз от верхнего края)"},
+        {"Type with Facet's keyboard", "Печатать клавиатурой Facet"},
+        {"Typed", "Набрано"},
     };
     return table;
 }

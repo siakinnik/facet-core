@@ -2,7 +2,9 @@
 // docs/ARCHITECTURE.md) and a builder for declarative screens.
 #pragma once
 
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,44 @@ private:
     Json ops_ = Json::array();
 };
 
+class Plugin;
+
+// Pixels drawn by the plugin itself (video, camera, remote screens, ...):
+// XRGB8888 in shared memory, double-buffered. Draw into pixels() when
+// ready(), then present(); the core shows it with Screen::surface() or full
+// screen (Screen::fullscreen()) and sends touches in its pixel coordinates.
+// Needs a core with surfaces (0.5+); older cores ignore it.
+class Surface {
+public:
+    Surface() = default;
+    ~Surface() { destroy(); }
+    Surface(const Surface&) = delete;
+    Surface& operator=(const Surface&) = delete;
+
+    // Creates (or resizes) the surface. False if shared memory is unavailable.
+    bool create(Plugin& plugin, const std::string& id, int width, int height);
+    void destroy();
+    bool valid() const { return map_ != nullptr; }
+    // A buffer is free: the core has taken the last presented one.
+    bool ready() const { return valid() && !waiting_; }
+    uint32_t* pixels();  // the buffer to draw now
+    int width() const { return w_; }
+    int height() const { return h_; }
+    int stride() const { return w_; }  // in pixels
+    const std::string& id() const { return id_; }
+    // Shows what was drawn; the next frame goes into the other buffer.
+    void present();
+
+private:
+    friend class Plugin;
+    Plugin* plugin_ = nullptr;
+    std::string id_;
+    int w_ = 0, h_ = 0, back_ = 0;
+    bool waiting_ = false;
+    void* map_ = nullptr;
+    size_t size_ = 0;
+};
+
 // Builds the UI tree a plugin sends to the core. Widget set mirrors ui::Context.
 class Screen {
 public:
@@ -75,6 +115,11 @@ public:
     Screen& button(std::string id, std::string label, std::string style = "normal");
     // Free drawing area, full content width, `height` dp tall.
     Screen& canvas(std::string id, float height, const Canvas& canvas);
+    // A Surface, full content width; height 0 keeps its aspect ratio.
+    Screen& surface(std::string id, float height = 0);
+    // Shows the Surface over the whole screen instead of the widgets (the
+    // user swipes down from the top edge to leave).
+    Screen& fullscreen(std::string surface_id);
     // Text input. Tapping it opens the on-screen keyboard; every change is
     // sent as event(id, text), "Done" as submit(id, text). mode: "text" or
     // "number". `secure` masks the value and always uses the core's built-in
@@ -168,7 +213,18 @@ public:
     std::function<void(const std::string& module, const std::vector<std::string>& scopes, bool running)>
         on_wayland_client;
 
+    // ---- Surfaces. A finger on a surface, in its pixel coordinates
+    // ("down", "move", "up"), and text typed on the core's keyboard while
+    // text_input(true): action "insert" (with text), "backspace", "enter", "hide".
+    std::function<void(const std::string& surface, const std::string& kind, float x, float y)> on_touch;
+    std::function<void(const std::string& action, const std::string& text)> on_text;
+
     const std::string& data_dir() const { return data_dir_; }
+    // Where Surface keeps its shared memory ("" on cores without surfaces).
+    const std::string& surface_dir() const { return surface_dir_; }
+    // The whole screen in pixels (a full-screen Surface should match it).
+    int screen_width() const { return screen_w_; }
+    int screen_height() const { return screen_h_; }
     // Width of the content column in dp: the width of canvas widgets.
     int content_width() const { return content_width_; }
 
@@ -213,6 +269,10 @@ public:
 
     // Compositor modules: the Wayland clients that are running now.
     void report_wayland_clients(const std::vector<WaylandClient>& clients);
+
+    // Ask the core to show its keyboard for this plugin's surface (typed
+    // text arrives in on_text) or to hide it. mode: "text" or "number".
+    void text_input(bool active, const std::string& mode = "text");
     // Keyboard plugins: current keyboard drawing and typed actions.
     void keyboard_ui(float height, const Canvas& canvas);
     void input(const std::string& action, const std::string& text = {});  // insert|backspace|enter|hide
@@ -239,6 +299,10 @@ private:
     int last_display_ = -1;
     std::vector<std::string> permissions_;
     Json last_badge_, last_icon_;
+    std::string surface_dir_;
+    int screen_w_ = 0, screen_h_ = 0;
+    std::map<std::string, Surface*> surfaces_;
+    friend class Surface;
 };
 
 }  // namespace facet::sdk

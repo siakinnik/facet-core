@@ -77,6 +77,11 @@ private:
     std::string keyboard_plugin() const;  // selected, running keyboard plugin or "" (built-in)
     std::vector<std::string> keyboard_langs() const;
     void render_plugin_ui(plugins::Plugin& p);
+    // Surfaces (screens.cpp): a widget or the whole screen; forwards touches.
+    void draw_surface(plugins::Plugin& p, const std::string& id, const gfx::Rect& r);
+    void draw_fullscreen_surface(plugins::Plugin& p, const std::string& id);
+    void track_surface_touch(plugins::Plugin& p, const std::string& id, const gfx::Rect& r, int sw, int sh,
+                             bool fullscreen);
 
     std::unique_ptr<platform::Platform> platform_;
     gfx::Canvas canvas_;
@@ -121,7 +126,14 @@ private:
         bool visible = false;
         uint64_t field = 0;
         std::string plugin;
+        std::string surface_owner;  // typing goes to this plugin's surface, not to a field
     } kb_;
+    // A finger that went down on a surface: it belongs to that surface until it lifts.
+    struct SurfaceTouch {
+        bool active = false, gesture = false;
+        std::string plugin, surface;
+        float start_y = 0, last_x = -1, last_y = -1;
+    } touch_;
     gfx::Rect kb_rect_;
     sdk::Keyboard builtin_kb_;  // also the fallback when the plugin is missing
     std::vector<std::pair<std::string, std::string>> kb_pending_;  // built-in keys, applied after the frame

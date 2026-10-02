@@ -34,8 +34,8 @@ a plugin can be written in any language that reads and writes JSON lines.
 
 For custom graphics a plugin uses the `canvas` widget: it sends draw
 operations with theme colours and touch targets, and the core still renders
-them (3.7). A pixel-buffer canvas for video can follow; the widget set is
-extensible.
+them (3.8). Pixels a plugin draws itself (video, a desktop) go through a
+surface in shared memory (3.7).
 
 ## 2. Core lifecycle
 
@@ -111,7 +111,11 @@ The first directory containing a given plugin id wins.
   only) and `reason` (shown to the user).
 - `provides` / `requires` are versioned capabilities, `"name@version"`
   (version 1 when omitted). A plugin whose `requires` no enabled plugin
-  `provides` with at least that version is not started ("needs …").
+  `provides` with at least that version is not started ("needs …"). A
+  `requires` entry may be `{ "name": "display.wayland@1", "install":
+  "siakinnik/facet-wayland" }`: the user is then told which module to install.
+  Capabilities are provided by plugins only (e.g. the Wayland module provides
+  `display.wayland`); the core itself depends on none of them.
   Keyboards provide `input.keyboard@1`; the core accepts keyboard messages
   only from such plugins.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
@@ -182,9 +186,10 @@ dangerous ones shown with a warning (system-wide powers).
 | `notifications` | dangerous | | may post notifications and calls (§3.6) |
 | `background` | normal | | keeps running while none of its screens is open |
 | `wake_lock` | normal | | may keep the screen on |
+| `display.surface` | dangerous | | may show its own pixels (§3.7), also full screen, and get touches and typed text for them |
 | `display.power` | special | | the core accepts `display` requests and sends `activity` |
 | `notifications.distributor` | special | | posts on behalf of other modules / apps, receives copies of all notifications |
-| `wayland.compositor` | special | | `/dev/dri/*`, `/dev/input/event*`: runs the display server |
+| `wayland.compositor` | special | | runs the Wayland display server for client modules (headless: it shows them through a surface) |
 | `wayland.window` | normal | | client scope: may show windows (enforced by the compositor) |
 | `wayland.clipboard` | dangerous | | client scope: clipboard |
 | `wayland.screencopy` | dangerous | yes | client scope: screen capture |
@@ -207,8 +212,9 @@ Stop): the nodes are removed at once and a plugin that does not release
 within 5 s is restarted, which closes what it still has open.
 
 **Wayland scopes are per client.** The compositor module (provides
-`display.wayland`, permission `wayland.compositor`) has the screen and input
-devices; client modules never inherit them. The core tells the compositor
+`display.wayland`, permission `wayland.compositor`) is an ordinary plugin: it
+renders headless into a surface that Facet shows, and gets touches and text
+from Facet. Client modules never inherit its permissions. The core tells the compositor
 which `wayland.*` scopes each client module was granted (`wayland_client`),
 and the compositor enforces them (the plan is one `security-context-v1`
 socket per client container).
@@ -242,13 +248,13 @@ Core → plugin:
 
 | `t` | fields | meaning |
 |---|---|---|
-| `hello` | `api`, `data_dir`, `permissions` (granted), `theme`, `locale`, `timezone`, `content_width` | first message |
+| `hello` | `api`, `data_dir`, `permissions` (granted), `surface_dir`, `screen` (`w`, `h` px), `theme`, `locale`, `timezone`, `content_width` | first message |
 | `ping` | `seq` | watchdog, answer with `pong` |
 | `visible` | `value: bool` | the plugin screen was opened/closed |
 | `event` | `id`, `value`, `action?` | the user changed a widget; `action: "submit"` when "Done" was pressed in a text field |
 | `locale` | `value` | UI language changed (`en`, `ru`, …); re-send UI and tile |
 | `timezone` | `value` | time zone changed (IANA id, `""` = system); the SDK applies it to `TZ` |
-| `layout` | `content_width` | width of the content column in dp changed (canvas width); re-send UI |
+| `layout` | `content_width`, `screen?` | width of the content column in dp or the screen size changed; re-send UI |
 | `activity` | — | the screen was touched (`display.power` only) |
 | `keyboard_show` | `mode`, `width`, `langs` | open the keyboard (`input.keyboard` only): field mode `text`/`number`, width in dp, layout languages |
 | `keyboard_key` | `hit` | a key of the keyboard's drawing was tapped |
@@ -257,6 +263,9 @@ Core → plugin:
 | `notification_action` | `id`, `action`, `source` | the user tapped (`open`), dismissed (`dismiss`), answered a call (`accept`/`decline`/`timeout`) or pressed a button |
 | `notification_posted` | `notification` | copy of every posted notification (subscribed distributors) |
 | `wayland_client` | `module`, `scopes`, `running` | compositor only: a client module started/stopped and its scopes |
+| `surface_shown` | `id`, `buffer` | the core took this buffer; the other one is free to draw |
+| `touch` | `surface`, `kind` (`down`/`move`/`up`), `x`, `y` | a finger on a surface, in its pixels |
+| `text` | `action` (`insert`/`backspace`/`enter`/`hide`), `text?` | typed on Facet's keyboard while `text_input` is on |
 | `shutdown` | — | exit within 2 s |
 
 Plugin → core:
@@ -265,7 +274,7 @@ Plugin → core:
 |---|---|---|
 | `hello` | `api`, `sdk`, `id`, `version` | reply to hello |
 | `pong` | `seq` | |
-| `ui` | `root` | screen tree (3.7) |
+| `ui` | `root` | screen tree (3.8) |
 | `tile` | `subtitle` | text under the plugin's menu tile |
 | `display` | `on: bool` | desired screen state (`display.power`) |
 | `keyboard_ui` | `height`, `ops` | the keyboard's drawing: canvas ops, full screen width (`input.keyboard`) |
@@ -280,6 +289,10 @@ Plugin → core:
 | `background` | `value`, `reason?` | background work started / ended (shown in Settings > Apps) |
 | `wake_lock` | `value` | keep the screen on (`wake_lock`) |
 | `wayland_clients` | `clients` | compositor only: the running Wayland clients |
+| `surface` | `id`, `w`, `h`, `stride`, `buffers` | a surface's buffer file is ready (`display.surface`) |
+| `surface_frame` | `id`, `buffer` | show this buffer |
+| `surface_destroy` | `id` | |
+| `text_input` | `active`, `mode` | show / hide Facet's keyboard for the surface |
 
 Plugins send already-translated text: they get the language in `hello` and
 `locale`. Unknown fields are ignored, so the protocol grows compatibly.
@@ -305,7 +318,25 @@ client's `org.freedesktop.Notifications`), and with
 the system, to route it elsewhere. Actions on a notification go to whoever
 posted it. Remote push servers chosen by the user are planned on top of this.
 
-### 3.7 UI tree
+### 3.7 Surfaces
+
+A plugin with `display.surface` can show its own pixels: video, a camera
+picture, or a whole desktop (the Wayland module). `facet::sdk::Surface`
+creates two XRGB8888 buffers in a file under `surface_dir` (tmpfs, mounted
+into the container at `/run/facet/surface`), draws into one, `present()`s
+it and waits for `surface_shown` before reusing the other. The core maps the
+file read-only and checks every size, so a plugin can at worst show garbage.
+
+The surface appears as a widget (`{"type": "surface", "id": …, "height":
+dp}`, height 0 keeps the aspect ratio) or over the whole screen (root
+`"fullscreen": "<id>"`, sized `screen.w` × `screen.h`). Touches on it arrive
+as `touch` in surface pixels; `text_input(true)` brings up Facet's keyboard
+and the keys arrive as `text`. Facet keeps the top edge of a full-screen
+surface: a swipe down from it goes back, so a plugin can never trap the user.
+This is additive in API 3: cores without surfaces ignore the messages and the
+widget.
+
+### 3.8 UI tree
 
 ```json
 { "title": "Screen & camera", "items": [
@@ -462,6 +493,6 @@ redrawn in full, which is slow on 4K panels; dirty-region rendering is next.
 
 ## 9. Not in scope yet
 
-- plugin sandboxing (separate uid, seccomp, cgroup limits), after the store;
-- plugin signing;
-- a pixel-buffer (shared memory) canvas for video and camera views.
+- seccomp filters and cgroup limits for plugin containers;
+- plugin signing (with the store);
+- plugins that bring their own root file system (container images).

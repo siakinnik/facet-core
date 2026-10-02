@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(facet VERSION 0.4.0 LANGUAGES CXX)
+project(facet VERSION 0.5.0 LANGUAGES CXX)
 set(FACET_VERSION_SUFFIX "alpha")  # pre-release tag; empty for final releases
 
 set(CMAKE_CXX_STANDARD 20)
