@@ -5,6 +5,8 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -476,6 +478,23 @@ void PluginHost::spawn(Plugin& p, double now) {
     if (!surfaces_ok && contains(p.granted, sandbox::kSurface))
         log::warn("plugins: %s: no surface directory", p.m.id.c_str());
     if (p.sandboxed && surfaces_ok) spec.surface_dir = sandbox::surface_dir(p.m.id);
+    if (surfaces_ok && gpu_buffers_) {
+        // The socket GPU buffers come through; the plugin (another uid) connects.
+        std::string path = sandbox::surface_dir(p.m.id) + "/.fds";
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        if (path.size() < sizeof addr.sun_path) {
+            std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+            ::unlink(path.c_str());
+            int s = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+            if (s >= 0 && ::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 && ::listen(s, 4) == 0) {
+                ::chmod(path.c_str(), 0666);
+                p.fds_listen = s;
+            } else if (s >= 0) {
+                ::close(s);
+            }
+        }
+    }
     std::string plugin_surfaces = !surfaces_ok          ? std::string()
                                   : p.sandboxed         ? std::string(sandbox::kSurfaceDirInContainer)
                                                         : sandbox::surface_dir(p.m.id);
@@ -512,6 +531,17 @@ void PluginHost::spawn(Plugin& p, double now) {
         std::string inside = std::string(sandbox::kRequiresInContainer) + "/" + need.name;
         if (p.sandboxed) spec.binds.push_back({host, inside});
         endpoints["requires"][need.name] = p.sandboxed ? inside : host;
+    }
+    // The OpenGL package (Settings > Graphics) for plugins that may use the
+    // GPU: Mesa's libraries and drivers, so their apps can draw with OpenGL.
+    std::string gl_dir;
+    if (contains(p.granted, sandbox::kGpu)) {
+        char real[PATH_MAX];
+        std::string pkg = paths::data_root() + "/gl/current";
+        if (file_exists(pkg + "/lib/dri") && realpath(pkg.c_str(), real)) {
+            gl_dir = p.sandboxed ? std::string(sandbox::kGlInContainer) : std::string(real);
+            if (p.sandboxed) spec.binds.push_back({real, sandbox::kGlInContainer, true});
+        }
     }
     if (p.sandboxed) {
         // A clean environment: nothing of Facet's leaks into the container.
@@ -599,6 +629,13 @@ void PluginHost::spawn(Plugin& p, double now) {
     hello["timezone"] = timezone_;
     hello["content_width"] = content_width_;
     hello["endpoints"] = endpoints;
+    hello["gl_dir"] = gl_dir;
+    if (p.fds_listen >= 0) {
+        hello["gpu_buffers"] = true;
+        hello["gpu_dev"] = double(gpu_dev_);
+        // The device node itself only with the permission (the same path in a container).
+        if (contains(p.granted, sandbox::kGpu)) hello["gpu_device"] = gpu_node_;
+    }
     send(p, hello);
     if (p.visible) {
         Json v = Json::object();
@@ -609,9 +646,70 @@ void PluginHost::spawn(Plugin& p, double now) {
 }
 
 void PluginHost::close_fds(Plugin& p) {
-    for (int* fd : {&p.fd_in, &p.fd_out, &p.fd_err}) {
+    for (int* fd : {&p.fd_in, &p.fd_out, &p.fd_err, &p.fds_listen}) {
         if (*fd >= 0) ::close(*fd);
         *fd = -1;
+    }
+    for (int fd : p.fds_conns) ::close(fd);
+    p.fds_conns.clear();
+    for (auto& [token, fd] : p.fd_tokens) ::close(fd);
+    p.fd_tokens.clear();
+}
+
+void PluginHost::close_gpu(SurfaceBuffer& s) {
+    for (auto& g : s.gpu) {
+        if (g.fd >= 0) ::close(g.fd);
+        g = GpuBuffer{};
+    }
+    s.gpu_current = -1;
+}
+
+void PluginHost::receive_fds(Plugin& p) {
+    if (p.fds_listen < 0) return;
+    for (int c; (c = ::accept4(p.fds_listen, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK)) >= 0;) {
+        if (p.fds_conns.size() >= 4) ::close(c);
+        else p.fds_conns.push_back(c);
+    }
+    for (size_t i = 0; i < p.fds_conns.size();) {
+        int c = p.fds_conns[i];
+        bool closed = false;
+        for (;;) {
+            char line[32];
+            alignas(cmsghdr) char ctrl[CMSG_SPACE(sizeof(int) * 4)];
+            iovec iov{line, sizeof line - 1};
+            msghdr mh{};
+            mh.msg_iov = &iov;
+            mh.msg_iovlen = 1;
+            mh.msg_control = ctrl;
+            mh.msg_controllen = sizeof ctrl;
+            ssize_t n = ::recvmsg(c, &mh, MSG_CMSG_CLOEXEC);
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) closed = true;
+            if (n <= 0) break;
+            line[n] = 0;
+            std::vector<int> fds;
+            for (cmsghdr* cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
+                if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS) continue;
+                size_t count = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                for (size_t k = 0; k < count; ++k) {
+                    int fd;
+                    std::memcpy(&fd, CMSG_DATA(cm) + k * sizeof(int), sizeof fd);
+                    fds.push_back(fd);
+                }
+            }
+            uint32_t token = uint32_t(std::strtoul(line, nullptr, 10));
+            // One descriptor per token, and only a few waiting at a time.
+            if (fds.size() == 1 && token && p.fd_tokens.size() < 64 && !p.fd_tokens.count(token)) {
+                p.fd_tokens[token] = fds[0];
+                fds.clear();
+            }
+            for (int fd : fds) ::close(fd);
+        }
+        if (closed) {
+            ::close(c);
+            p.fds_conns.erase(p.fds_conns.begin() + long(i));
+        } else {
+            ++i;
+        }
     }
 }
 
@@ -875,7 +973,8 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
                 changed_ = true;
             }
         }
-    } else if (t == "surface" || t == "surface_frame" || t == "surface_destroy") {
+    } else if (t == "surface" || t == "surface_frame" || t == "surface_destroy" || t == "surface_buffer" ||
+               t == "surface_buffer_drop") {
         if (!p.holds(sandbox::kSurface)) {
             log::warn("plugins: %s: surface without the display.surface permission", p.m.id.c_str());
             return;
@@ -959,12 +1058,15 @@ void PluginHost::add_poll_fds(std::vector<pollfd>& fds) const {
         if (p->fd_out >= 0) fds.push_back({p->fd_out, POLLIN, 0});
         if (p->fd_err >= 0) fds.push_back({p->fd_err, POLLIN, 0});
         if (p->fd_in >= 0 && !p->wbuf.empty()) fds.push_back({p->fd_in, POLLOUT, 0});
+        if (p->fds_listen >= 0) fds.push_back({p->fds_listen, POLLIN, 0});
+        for (int c : p->fds_conns) fds.push_back({c, POLLIN, 0});
     }
 }
 
 void PluginHost::process(double now) {
     for (auto& ptr : plugins_) {
         Plugin& p = *ptr;
+        if (p.pid > 0) receive_fds(p);  // before the messages that name the descriptors
         if (p.pid > 0) read_pipes(p, now);
         if (p.pid > 0) {
             int st = 0;
@@ -1409,6 +1511,7 @@ bool valid_surface_id(const std::string& id) {
 
 void PluginHost::unmap_surfaces(Plugin& p) {
     for (auto& [id, s] : p.surfaces) {
+        close_gpu(s);
         if (s.map) munmap(const_cast<uint8_t*>(s.map), s.size);
         if (!s.lent_to.empty()) send_lent(p, id, s.lent_to, nullptr);
     }
@@ -1423,8 +1526,35 @@ void PluginHost::handle_surface(Plugin& p, const Json& msg) {
     const std::string id = msg["id"].str();
     if (!valid_surface_id(id)) return;
     auto it = p.surfaces.find(id);
+    if (t == "surface_buffer" || t == "surface_buffer_drop") {
+        int slot = msg["slot"].as_int(-1);
+        if (it == p.surfaces.end() || slot < 0 || slot >= SurfaceBuffer::kGpuSlots) return;
+        GpuBuffer& g = it->second.gpu[slot];
+        if (g.fd >= 0) ::close(g.fd);
+        g = GpuBuffer{};
+        if (it->second.gpu_current == slot) it->second.gpu_current = -1;
+        if (t == "surface_buffer_drop") return;
+        uint32_t token = uint32_t(msg["token"].as_number(0));
+        if (!p.fd_tokens.count(token)) receive_fds(p);  // sent just before this message
+        auto ft = p.fd_tokens.find(token);
+        if (ft == p.fd_tokens.end()) {
+            log::warn("plugins: %s: surface %s: GPU buffer without its descriptor", p.m.id.c_str(), id.c_str());
+            return;
+        }
+        g.fd = ft->second;
+        p.fd_tokens.erase(ft);
+        g.format = uint32_t(msg["format"].as_number(0));
+        g.modifier = uint64_t(uint32_t(msg["mod_hi"].as_number(0))) << 32 | uint32_t(msg["mod_lo"].as_number(0));
+        g.offset = uint32_t(msg["offset"].as_number(0));
+        g.stride = uint32_t(msg["stride"].as_number(0));
+        g.generation = ++next_generation_;
+        g.w = std::clamp(msg["w"].as_int(it->second.w), 1, it->second.w);
+        g.h = std::clamp(msg["h"].as_int(it->second.h), 1, it->second.h);
+        return;
+    }
     if (t == "surface_destroy") {
         if (it != p.surfaces.end()) {
+            close_gpu(it->second);
             if (it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
             if (!it->second.lent_to.empty()) send_lent(p, id, it->second.lent_to, nullptr);
             p.surfaces.erase(it);
@@ -1434,9 +1564,42 @@ void PluginHost::handle_surface(Plugin& p, const Json& msg) {
     }
     if (t == "surface_frame") {
         if (it == p.surfaces.end()) return;
+        int slot = msg["gpu"].as_int(-1);
+        if (slot >= 0) {
+            // Only the GPU can show these; without it the frame is acknowledged and dropped.
+            if (slot >= SurfaceBuffer::kGpuSlots || it->second.gpu[slot].fd < 0 || !gpu_layers_) {
+                Json ack = Json::object();
+                ack["t"] = "surface_shown";
+                ack["id"] = id;
+                send(p, ack);
+                return;
+            }
+            bool first = it->second.current < 0 && it->second.gpu_current < 0;
+            it->second.gpu_current = slot;
+            const GpuBuffer& g = it->second.gpu[slot];
+            // A frame of another size is laid out anew (drawn where it covers).
+            if (first || g.w != it->second.shown_w || g.h != it->second.shown_h) changed_ = true;
+            it->second.shown_w = g.w;
+            it->second.shown_h = g.h;
+            it->second.ack_pending = true;  // once the GPU no longer needs the buffer it replaces
+            surface_frames_ = true;
+            return;
+        }
         int b = msg["buffer"].as_int(-1);
         if (b < 0 || b >= it->second.buffers) return;
+        bool first = it->second.current < 0 && it->second.gpu_current < 0;
+        if (it->second.shown_w != it->second.w || it->second.shown_h != it->second.h) first = true;
+        it->second.shown_w = it->second.w;
+        it->second.shown_h = it->second.h;
         it->second.current = b;
+        it->second.gpu_current = -1;
+        if (first) changed_ = true;  // it can be laid out now
+        if (gpu_layers_) {
+            // The GPU reads the buffer later: acknowledged after its upload.
+            it->second.ack_pending = true;
+            surface_frames_ = true;
+            return;
+        }
         Json ack = Json::object();
         ack["t"] = "surface_shown";
         ack["id"] = id;
@@ -1478,13 +1641,43 @@ void PluginHost::handle_surface(Plugin& p, const Json& msg) {
         return;
     }
     if (it != p.surfaces.end()) {
+        close_gpu(it->second);  // a new size: the plugin attaches new GPU buffers
         if (it->second.map) munmap(const_cast<uint8_t*>(it->second.map), it->second.size);
         if (it->second.lent_to != lent_to && !it->second.lent_to.empty()) send_lent(p, id, it->second.lent_to, nullptr);
     }
     SurfaceBuffer& s = p.surfaces[id];
-    s = SurfaceBuffer{w, h, stride, buffers, -1, static_cast<const uint8_t*>(map), need, lent_to};
+    s = SurfaceBuffer{};
+    s.w = w, s.h = h, s.stride = stride, s.buffers = buffers;
+    s.map = static_cast<const uint8_t*>(map);
+    s.size = need;
+    s.lent_to = lent_to;
+    s.generation = ++next_generation_;
     if (!lent_to.empty()) send_lent(p, id, lent_to, &s);
     changed_ = true;
+}
+
+std::string PluginHost::surface_file(const std::string& owner, const std::string& id) const {
+    return sandbox::surface_dir(owner) + "/" + id + ".buf";
+}
+
+bool PluginHost::take_surface_frames() {
+    bool f = surface_frames_;
+    surface_frames_ = false;
+    return f;
+}
+
+void PluginHost::ack_surface(const std::string& owner, const std::string& id) {
+    Plugin* p = find(owner);
+    if (!p || p->state != State::Running) return;
+    auto it = p->surfaces.find(id);
+    if (it == p->surfaces.end() || !it->second.ack_pending) return;
+    it->second.ack_pending = false;
+    Json ack = Json::object();
+    ack["t"] = "surface_shown";
+    ack["id"] = id;
+    if (it->second.gpu_current >= 0) ack["gpu"] = it->second.gpu_current;
+    else ack["buffer"] = it->second.current;
+    send(*p, ack);
 }
 
 SurfaceRef PluginHost::find_surface(const Plugin& viewer, const std::string& id) const {

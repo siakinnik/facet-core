@@ -378,7 +378,7 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
         for (size_t at = b.inside.find('/', 1); at != std::string::npos; at = b.inside.find('/', at + 1))
             ops.push_back({Op::Dir, {}, stage + b.inside.substr(0, at)});
         ops.push_back({Op::Dir, {}, stage + b.inside});
-        ops.push_back({Op::Bind, b.host, stage + b.inside, false, false});
+        ops.push_back({Op::Bind, b.host, stage + b.inside, b.read_only, b.read_only});
     }
     ops.push_back({Op::Dir, {}, stage + "/tmp"});
     ops.push_back({Op::Tmpfs, {}, stage + "/tmp", false, false, "mode=0700,size=64m,uid=" + uid + ",gid=" + uid});
@@ -458,6 +458,12 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
         ops.push_back({Op::Bind, "/", stage + "/host", true, true});
     } else {
         ops.push_back({Op::Proc, {}, stage + "/proc"});
+        if (has(spec.granted, kGpu)) {
+            // The GPU drivers find their device (PCI ids, the render node
+            // behind a device number) in sysfs; read-only.
+            ops.push_back({Op::Dir, {}, stage + "/sys"});
+            ops.push_back({Op::Bind, "/sys", stage + "/sys", true, true});
+        }
     }
 
     std::string exe = "/plugin/" + spec.exec;

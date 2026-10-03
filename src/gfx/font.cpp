@@ -21,6 +21,8 @@ bool Font::load(const std::string& path) {
     data_.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     if (data_.size() < 12) return false;
     path_ = path;
+    static uint32_t loads = 0;
+    id_ = ++loads;
     cache_.clear();
 
     uint32_t base = 0;

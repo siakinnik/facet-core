@@ -39,3 +39,11 @@ jobs:
 
       - name: Smoke test
         run: bash scripts/ci/smoke.sh build-static/facet
+
+      - name: GPU helper without a screen (Mesa's software rasterizer)
+        run: |
+          sudo apt-get install -y --no-install-recommends libdrm-dev libgbm-dev libegl-dev libgles-dev \
+            libegl1-mesa-dev libgl1-mesa-dri
+          cmake -S . -B build-gpu -G Ninja -DCMAKE_BUILD_TYPE=Release -DFACET_GPU_HELPER=ON
+          cmake --build build-gpu --target facet-gpu
+          LIBGL_ALWAYS_SOFTWARE=1 python3 scripts/ci/gpu-smoke.py build-gpu/facet-gpu

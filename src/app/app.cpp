@@ -1,6 +1,7 @@
 #include "app/app.h"
 
 #include <dirent.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -157,12 +158,42 @@ bool App::init() {
     signal(SIGPIPE, SIG_IGN);
 
     debug_input_ = std::getenv("FACET_DEBUG_INPUT") != nullptr;
-    platform_ = platform::create_platform();
-    if (!platform_->init()) return false;
-    canvas_.resize(platform_->width(), platform_->height());
-
+    debug_frames_ = std::getenv("FACET_DEBUG_FRAMES") != nullptr;
     paths::mkdirs(paths::data_root());
     config_.load(paths::data_root() + "/config.json");
+
+    platform::Options popt;
+    popt.gpu = config_.get_str("graphics", "cpu") == "gpu";
+    popt.card = config_.get_str("graphics_card", "");
+    if (popt.card.empty())
+        for (const auto& g : gpu::detect_gpus())
+            if (g.supported) {
+                popt.card = g.card;
+                break;
+            }
+    popt.gl_dir = paths::data_root() + "/gl/current";
+    popt.data_dir = paths::data_root();
+    platform_ = platform::create_platform(popt);
+    if (!platform_->init()) return false;
+    ops_ = platform_->supports_ops();
+    if (ops_)
+        canvas_.record_into(&rec_, platform_->width(), platform_->height());
+    else if (uint32_t* mem = platform_->canvas_memory())
+        canvas_.use_external(mem, platform_->width(), platform_->height());
+    else
+        canvas_.resize(platform_->width(), platform_->height());
+    layers_ = platform_->supports_layers();
+    host_.set_gpu_layers(layers_);
+    if (ops_ && platform_->supports_gpu_buffers()) {
+        // Plugins may hand the GPU their GPU-drawn frames (Wayland apps).
+        const char* dev = std::getenv("FACET_GPU_DEVICE");
+        std::string node = dev ? dev : gpu::render_node(popt.card);
+        struct stat st;
+        if (!node.empty() && ::stat(node.c_str(), &st) == 0) host_.set_gpu_buffers(true, node, uint64_t(st.st_rdev));
+    }
+    vram_budget_ = uint64_t(std::max(0, config_.get_int("graphics_vram_mb", 0))) << 20;
+    gpus_ = gpu::detect_gpus();
+    gl_ = std::make_unique<gpu::GlPackage>(paths::data_root() + "/gl");
     set_language(config_.get_str("language", detect_language()), false);
     {
         std::string zone = config_.get_str("timezone", "");
@@ -179,7 +210,7 @@ bool App::init() {
     splash_start_ = last_tick_ = last_input_ = t;
     boot_stage_ = 0;
     run_frame(t);  // splash is on screen before anything slow happens
-    platform_->present(canvas_);
+    present_frame(true);
 
     host_.scan();
     host_.start_enabled(t);
@@ -207,7 +238,10 @@ int App::run() {
         // (waking marks the frame dirty anyway), otherwise poll() would spin.
         bool animating = display_on_ && (ui_.wants_redraw() || view_ == View::Splash);
         if (animating) next = std::min(next, t + 1.0 / 60);
-        bool redraw_now = dirty_ && display_on_;
+        if (gl_ && gl_->busy()) next = std::min(next, t + 0.5);  // download progress
+        // While the GPU still reads the last canvas, drawing waits (its
+        // message wakes the loop).
+        bool redraw_now = dirty_ && display_on_ && platform_->ready_to_draw();
         int timeout = redraw_now ? 0 : std::max(0, int(std::ceil((next - t) * 1000)));
 
         fds.clear();
@@ -223,12 +257,43 @@ int App::run() {
         platform_->pump(events);
         host_.process(t);
         if (host_.take_changed()) dirty_ = true;
+        bool surface_frames = host_.take_surface_frames();
+        // Surfaces over the video memory limit are part of the canvas: their frames redraw it.
+        if (surface_frames && cpu_surface_frames_) dirty_ = true;
         take_plugin_input();
         drew_ = false;
         handle_events(events, t);
         tick(t);
-        if ((dirty_ || ui_.wants_redraw()) && display_on_) run_frame(t);
-        if (drew_ && display_on_) platform_->present(canvas_);
+        double t0 = debug_frames_ ? now_s() : 0;
+        if ((dirty_ || ui_.wants_redraw()) && display_on_ && platform_->ready_to_draw()) run_frame(t);
+        double t1 = debug_frames_ ? now_s() : 0;
+        if (drew_ && display_on_) present_frame(true);
+        if (debug_frames_ && drew_) {
+            ++stat_frames_;
+            stat_draw_ += t1 - t0;
+            stat_present_ += now_s() - t1;
+        }
+        if (debug_frames_ && t - stat_since_ >= 5) {
+            if (stat_frames_ > 0)
+                log::info("frames: %.1f fps, drawing %.1f ms, presenting %.1f ms per frame",
+                          stat_frames_ / (t - stat_since_), stat_draw_ * 1000 / stat_frames_,
+                          stat_present_ * 1000 / stat_frames_);
+            stat_frames_ = 0;
+            stat_draw_ = stat_present_ = 0;
+            stat_since_ = t;
+        }
+        if (drew_) {
+            cpu_surface_frames_ = !cpu_surfaces_.empty();
+            for (const auto& [owner, id] : cpu_surfaces_) host_.ack_surface(owner, id);  // copied already
+        }
+        else if (surface_frames && display_on_ && layers_) present_frame(false);  // only the surfaces moved on
+        if (ops_unsent_ && !drew_ && display_on_ && platform_->ready_to_draw()) present_frame(true);
+        // Surface frames the GPU has taken: their plugins may draw the next ones.
+        for (const auto& key : platform_->take_uploaded()) {
+            size_t slash = key.find('/'), hash = key.rfind('#');
+            if (slash != std::string::npos && hash != std::string::npos && hash > slash)
+                host_.ack_surface(key.substr(0, slash), key.substr(slash + 1, hash - slash - 1));
+        }
         config_.save_if_dirty(t);
     }
 
@@ -239,8 +304,83 @@ int App::run() {
     return 0;
 }
 
+// The service manager starts Facet again (Restart=always).
+void App::request_restart() {
+    log::info("facet: restarting to apply the graphics settings");
+    g_quit = 1;
+}
+
+// The (up to three) buffers the screen shows and the canvas texture, or
+// with GPU drawing the mask atlas instead of the canvas.
+uint64_t App::vram_base() const {
+    if (!layers_) return 0;
+    uint64_t screen = uint64_t(canvas_.width()) * uint64_t(canvas_.height()) * 4;
+    if (ops_) return screen * 3 + uint64_t(rec_.atlas_pages()) * gfx::ops::kAtlasSize * gfx::ops::kAtlasSize;
+    return screen * 4;
+}
+
+void App::present_frame(bool canvas_changed) {
+    if (!layers_) {
+        platform_->present(canvas_);
+        return;
+    }
+    std::vector<platform::Layer> layers;
+    for (const auto& ref : layer_refs_) {
+        plugins::Plugin* o = host_.find(ref.owner);
+        const plugins::SurfaceBuffer* sb = o ? o->surface(ref.id) : nullptr;
+        if (!sb) {
+            // Recorded commands refer to layers by number: keep the place.
+            if (ops_) layers.emplace_back();
+            continue;
+        }
+        platform::Layer l;
+        l.key = ref.owner + "/" + ref.id + "#" + std::to_string(sb->generation);
+        l.path = host_.surface_file(ref.owner, ref.id);
+        l.w = sb->w, l.h = sb->h, l.stride = sb->stride, l.buffers = sb->buffers, l.buffer = sb->current;
+        l.dst = ref.dst;
+        l.clip = ref.clip;
+        if (sb->gpu_current >= 0) {
+            const plugins::GpuBuffer& g = sb->gpu[sb->gpu_current];
+            l.gpu = sb->gpu_current;
+            l.gpu_fd = g.fd;
+            l.gpu_format = g.format;
+            l.gpu_modifier = g.modifier;
+            l.gpu_offset = g.offset;
+            l.gpu_stride = g.stride;
+            l.gpu_generation = g.generation;
+            l.gpu_w = g.w;
+            l.gpu_h = g.h;
+            // Smaller than the surface: only its top left part.
+            l.dst.w = ref.dst.w * float(g.w) / float(sb->w);
+            l.dst.h = ref.dst.h * float(g.h) / float(sb->h);
+            l.clip = l.clip.intersect(l.dst);
+        }
+        layers.push_back(l);
+    }
+    if (ops_) {
+        // The helper may still read the last commands: new ones wait for it
+        // (frames drawn meanwhile replace this one).
+        if (canvas_changed && !platform_->ready_to_draw()) {
+            ops_unsent_ = true;
+            return;
+        }
+        static const std::vector<uint8_t> kSame;  // the previous commands again
+        platform_->present_ops(canvas_changed ? rec_.data() : kSame, layers);
+        if (canvas_changed) {
+            rec_.sent();
+            ops_unsent_ = false;
+        }
+        return;
+    }
+    platform_->present_layers(canvas_, canvas_changed, layers);
+}
+
 void App::run_frame(double t) {
     dirty_ = false;  // navigation inside the frame sets it again
+    layer_refs_.clear();
+    cpu_surfaces_.clear();
+    frame_vram_ = vram_base();
+    if (ops_) rec_.begin_frame(platform_->take_ops_lost());
     moved_ = false;
     update_theme(false);
     ui_.begin_frame(canvas_, theme_, pointer_, t);
@@ -252,6 +392,7 @@ void App::run_frame(double t) {
         case View::Menu: draw_menu(); break;
         case View::Dashboard: draw_dashboard(); break;
         case View::Settings: draw_settings(t); break;
+        case View::Graphics: draw_graphics(); break;
         case View::Plugin: draw_plugin(t); break;
         case View::Apps: draw_apps(); break;
         case View::AppInfo: draw_app_info(t); break;
@@ -305,6 +446,10 @@ void App::handle_events(const std::vector<platform::Event>& events, double t) {
                 }
                 pointer_.x = e.x;
                 pointer_.y = e.y;
+                // These frames cannot wait for the loop; drawn into memory the
+                // GPU reads, they wait for it to finish the last one.
+                if (layers_ && !ops_ && (e.type == EventType::Down || e.type == EventType::Up))
+                    platform_->wait_ready(100);
                 if (e.type == EventType::Down) {
                     pointer_.down = true;
                     pointer_.pressed = true;
@@ -343,8 +488,18 @@ void App::tick(double t) {
         return;
     }
 
-    if ((view_ == View::Settings || view_ == View::Plugin || view_ == View::Apps || view_ == View::AppInfo ||
-         view_ == View::Notifications) &&
+    update_gfx_dialog();
+    // Settings > Graphics follows the download: progress twice a second, and every change of phase.
+    if (view_ == View::Graphics) {
+        int phase = int(gl_->status().phase) * 2 + (gl_->busy() ? 1 : 0);
+        if (phase != gfx_phase_ || (gl_->busy() && t - gfx_refresh_ >= 0.5)) {
+            gfx_phase_ = phase;
+            gfx_refresh_ = t;
+            dirty_ = true;
+        }
+    }
+    if ((view_ == View::Settings || view_ == View::Graphics || view_ == View::Plugin || view_ == View::Apps ||
+         view_ == View::AppInfo || view_ == View::Notifications) &&
         t - last_input_ > kIdleToMenu && !modal_active(t))
         navigate(View::Menu);
     if ((view_ == View::Menu || view_ == View::Dashboard) && local_now().tm_min != drawn_minute_) dirty_ = true;

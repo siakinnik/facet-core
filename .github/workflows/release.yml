@@ -54,8 +54,33 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if [[ "$version" == *-* ]]; then echo "prerelease=true"; else echo "prerelease=false"; fi >> "$GITHUB_OUTPUT"
 
-  build:
+  # The OpenGL package (GPU helper + Mesa from Ubuntu 22.04) that devices
+  # download on demand; built per architecture under QEMU.
+  gl:
     needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [x86_64, aarch64, armv7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Build the OpenGL package
+        run: bash scripts/build-gl.sh dist "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: facet-gl-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build:
+    needs: [prepare, gl]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
@@ -87,9 +112,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build fonts-dejavu-core qemu-user-static ${{ matrix.packages }}
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: facet-gl-${{ matrix.arch }}
+          path: gl
+
       - name: Build static binary
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFACET_STATIC=ON \
+          pkg="$(ls gl/facet-gl-*.tar.gz)"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFACET_STATIC=ON -DFACET_GPU_HELPER=OFF \
+            -DFACET_GL_SHA256="$(sha256sum "$pkg" | cut -c1-64)" -DFACET_GL_SIZE="$(stat -c %s "$pkg")" \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} ${{ matrix.cmake_cross }}
           cmake --build build
           file build/facet
@@ -109,7 +141,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [prepare, build]
+    needs: [prepare, gl, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -127,7 +159,8 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           cat > notes.md <<EOF
-          Install or update on a device (x86_64, aarch64, armv7):
+          Install or update on a device (x86_64, aarch64, armv7). The facet-gl archives are the OpenGL
+          drivers Facet downloads itself when the graphics card is switched on (Settings > Graphics).
 
           \`\`\`bash
           curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/get.sh | sudo bash -s -- --version ${TAG}

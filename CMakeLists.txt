@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(facet VERSION 0.6.1 LANGUAGES CXX)
+project(facet VERSION 0.7.0 LANGUAGES CXX)
 set(FACET_VERSION_SUFFIX "alpha")  # pre-release tag; empty for final releases
 
 set(CMAKE_CXX_STANDARD 20)
@@ -30,9 +30,14 @@ add_executable(facet
     src/gfx/canvas.cpp
     src/gfx/font.cpp
     src/gfx/raster.cpp
+    src/gfx/recorder.cpp
+    src/gpu/channel.cpp
+    src/gpu/gl_package.cpp
+    src/gpu/sha256.cpp
     src/platform/backlight.cpp
     src/platform/evdev_touch.cpp
     src/platform/fbdev.cpp
+    src/platform/gpu.cpp
     src/platform/headless.cpp
     src/platform/platform.cpp
     src/plugins/notifications.cpp
@@ -58,6 +63,34 @@ add_custom_target(facet_build_info
     BYPRODUCTS ${FACET_GENERATED}/build_info_gen.h
     COMMENT "Collecting build info")
 add_dependencies(facet facet_build_info)
+
+# Release builds know their OpenGL package (built by scripts/build-gl.sh in the
+# same release) by its SHA-256: only exactly that file is installed.
+set(FACET_GL_SHA256 "" CACHE STRING "SHA-256 of this release's OpenGL package")
+set(FACET_GL_SIZE "0" CACHE STRING "Size of this release's OpenGL package in bytes")
+if(FACET_GL_SHA256)
+    target_compile_definitions(facet PRIVATE FACET_GL_SHA256="${FACET_GL_SHA256}" FACET_GL_SIZE=${FACET_GL_SIZE})
+endif()
+
+# The GPU helper (facet-gpu): dynamically linked against the GPU drivers
+# (Mesa), so it is not part of the static core. It ships in the downloadable
+# OpenGL package; built when the development files are installed.
+option(FACET_GPU_HELPER "Build the GPU helper (needs libdrm, gbm, EGL, GLESv2)" ON)
+if(FACET_GPU_HELPER)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FACET_GL QUIET libdrm gbm egl glesv2)
+    endif()
+    if(FACET_GL_FOUND)
+        add_executable(facet-gpu src/gpu/helper/facet_gpu.cpp src/gpu/channel.cpp sdk/src/json.cpp)
+        target_include_directories(facet-gpu PRIVATE src sdk/include ${FACET_GL_INCLUDE_DIRS})
+        target_link_libraries(facet-gpu PRIVATE ${FACET_GL_LIBRARIES})
+        target_compile_options(facet-gpu PRIVATE -Wall -Wextra)
+        message(STATUS "Building the GPU helper (facet-gpu)")
+    else()
+        message(STATUS "GPU helper not built (libdrm/gbm/EGL/GLESv2 development files missing)")
+    endif()
+endif()
 target_include_directories(facet PRIVATE ${FACET_GENERATED})
 target_compile_options(facet PRIVATE -Wall -Wextra)
 target_link_libraries(facet PRIVATE facet_sdk pthread)

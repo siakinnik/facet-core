@@ -9,6 +9,8 @@ takes the panel down.
   early boot; needs only libc (and libX11 for the optional development window).
 - Built-in: splash screen, tile menu, clock dashboard, settings (theme,
   brightness, language, plugins).
+- Draws with the processor everywhere; optionally with the graphics card
+  (DRM/KMS + OpenGL ES), whose drivers Facet downloads on demand.
 - Dark and light themes, automatic day/night switching, English and Russian UI,
   per-panel time zone (without touching the system zone).
 - On-screen keyboard as a replaceable plugin (EN/RU, symbols, numeric pad);
@@ -135,6 +137,8 @@ environment covers hardware specifics; with the service, edit
 | `FACET_PLUGIN_PATH` | extra plugin directories, `:` separated |
 | `FACET_FONT_DIR` | extra font directory |
 | `FACET_DEBUG_INPUT` | log every touch down/up |
+| `FACET_DEBUG_FRAMES` | log frame rate and drawing time every 5 s |
+| `FACET_GPU_OPS` | `0`: with the GPU, draw the interface on the CPU and only compose on the GPU |
 
 Plugins are loaded from `<prefix>/lib/facet/plugins/<id>/`,
 `/usr/lib/facet/plugins`, `/var/lib/facet/plugins` and `FACET_PLUGIN_PATH`.

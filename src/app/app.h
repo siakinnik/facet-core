@@ -10,7 +10,9 @@
 #include "core/config.h"
 #include "core/netstatus.h"
 #include "facet/keyboard.h"
+#include "gpu/gl_package.h"
 #include "gfx/canvas.h"
+#include "gfx/recorder.h"
 #include "platform/platform.h"
 #include "plugins/plugin_host.h"
 #include "ui/context.h"
@@ -23,7 +25,7 @@ public:
     int run();
 
 private:
-    enum class View { Splash, Menu, Dashboard, Settings, Plugin, Apps, AppInfo, Notifications };
+    enum class View { Splash, Menu, Dashboard, Settings, Graphics, Plugin, Apps, AppInfo, Notifications };
 
     bool init();
     bool load_fonts();
@@ -46,6 +48,30 @@ private:
     void draw_menu();
     void draw_dashboard();
     void draw_settings(double t);
+    // Settings > Graphics: CPU or GPU, the graphics card, the OpenGL package.
+    void draw_graphics();
+    // First start / after an update: how to draw, then which graphics card
+    // and how much video memory; then the download and the restart.
+    enum class GfxDialog { None, Offer, Card, Memory, Restart };
+    GfxDialog gfx_dialog_ = GfxDialog::None;
+    void finish_gfx_setup();
+    void update_gfx_dialog();
+    void draw_gfx_dialog();
+    // A centred card with a title, text and buttons; returns the clicked id.
+    std::string draw_dialog(const std::string& key, const std::string& title, const std::string& text,
+                            const std::vector<std::pair<std::string, std::string>>& buttons);
+    void request_restart();
+    std::vector<gpu::GpuInfo> gpus_;
+    std::unique_ptr<gpu::GlPackage> gl_;
+    bool restart_needed_ = false;
+    // Video memory Facet may use for its picture (bytes, 0 = no limit):
+    // surfaces past it are copied into the canvas on the CPU instead.
+    uint64_t vram_budget_ = 0, frame_vram_ = 0;
+    uint64_t vram_base() const;  // canvas + scanout buffers
+    std::vector<std::pair<std::string, std::string>> cpu_surfaces_;  // drawn into the canvas this frame
+    bool cpu_surface_frames_ = false;  // the last frame had such surfaces
+    double gfx_refresh_ = 0;
+    int gfx_phase_ = -1;
     void draw_timezone_settings();
     void draw_status_bar(float right, float cy);
     void draw_build_line(float y);
@@ -113,6 +139,10 @@ private:
     bool swallow_ = false;
     bool moved_ = false;  // pointer moved since the last frame
     bool debug_input_ = false;  // FACET_DEBUG_INPUT: log every down/up
+    // FACET_DEBUG_FRAMES: frames per second and where their time goes, every 5 s.
+    bool debug_frames_ = false;
+    int stat_frames_ = 0;
+    double stat_draw_ = 0, stat_present_ = 0, stat_since_ = 0;
     bool display_on_ = true;
     double last_input_ = 0, last_touch_ = 0, last_activity_sent_ = 0;
 
@@ -136,6 +166,18 @@ private:
         float start_y = 0, last_x = -1, last_y = -1;
     } touch_;
     std::vector<std::string> surface_owners_;  // owners of the surfaces on screen now
+    // GPU composition: the surfaces of the last frame, drawn under the canvas.
+    struct LayerRef {
+        std::string owner, id;
+        gfx::Rect dst, clip;
+    };
+    std::vector<LayerRef> layer_refs_;
+    bool layers_ = false;  // the platform composes surfaces itself
+    bool ops_ = false;     // ... and draws the interface from recorded commands
+    bool ops_unsent_ = false;  // a recorded frame waits for the helper to read the last one
+    gfx::Recorder rec_;
+    void present_frame(bool canvas_changed);
+    void put_surface(const plugins::SurfaceRef& s, const std::string& id, const gfx::Rect& dst, const gfx::Rect& clip);
     gfx::Rect kb_rect_;
     sdk::Keyboard builtin_kb_;  // also the fallback when the plugin is missing
     std::vector<std::pair<std::string, std::string>> kb_pending_;  // built-in keys, applied after the frame

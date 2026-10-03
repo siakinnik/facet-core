@@ -91,12 +91,29 @@ public:
     // Shows what was drawn; the next frame goes into the other buffer.
     void present();
 
+    // ---- GPU buffers (core 0.7+, when Plugin::gpu_buffers()): frames drawn
+    // by the GPU are shown without copying. A buffer is a dma-buf with one
+    // plane, the surface's size, DRM format XRGB8888 or ARGB8888 (alpha is
+    // ignored); attach it once into a slot, then present it as often as it
+    // has a new frame. The core keeps showing a buffer until another frame
+    // replaces it: after the ready() that follows, every slot but
+    // shown_buffer() may be drawn into again. present() (shared memory)
+    // works as before in between. A buffer may be smaller than the surface
+    // (`width`, `height`; 0 = the surface's): it covers its top left part.
+    static constexpr int kMaxGpuBuffers = 8;
+    bool attach_buffer(int slot, int dmabuf_fd, uint32_t drm_format, uint64_t modifier, uint32_t offset,
+                       uint32_t stride, int width = 0, int height = 0);
+    void detach_buffer(int slot);
+    void present_buffer(int slot);
+    // The GPU buffer on screen now, -1 if none (or shared memory is).
+    int shown_buffer() const { return shown_gpu_; }
+
 private:
     friend class Plugin;
     Plugin* plugin_ = nullptr;
     std::string id_;
     std::string for_;
-    int w_ = 0, h_ = 0, back_ = 0;
+    int w_ = 0, h_ = 0, back_ = 0, shown_gpu_ = -1;
     bool waiting_ = false;
     void* map_ = nullptr;
     size_t size_ = 0;
@@ -257,6 +274,15 @@ public:
     int screen_height() const { return screen_h_; }
     // Width of the content column in dp: the width of canvas widgets.
     int content_width() const { return content_width_; }
+    // The OpenGL package (Mesa: lib/, lib/dri/, share/glvnd/) when the user
+    // installed it and this plugin has the "gpu" permission, else "" (core 0.7+).
+    const std::string& gl_dir() const { return gl_dir_; }
+    // The core shows GPU buffers on surfaces (Surface::attach_buffer), i.e.
+    // the GPU draws Facet; the graphics card in use: its render node (only
+    // with the "gpu" permission, else "") and device number (core 0.7+).
+    bool gpu_buffers() const { return gpu_buffers_; }
+    const std::string& gpu_device() const { return gpu_device_; }
+    uint64_t gpu_device_id() const { return gpu_dev_; }
     // Endpoint directory of a capability this plugin requires / provides, "" if none.
     std::string endpoint(const std::string& capability) const;
     std::string provided_endpoint(const std::string& capability) const;
@@ -342,6 +368,14 @@ private:
     int screen_w_ = 0, screen_h_ = 0;
     std::map<std::string, Surface*> surfaces_;
     Json endpoints_;
+    std::string gl_dir_, gpu_device_;
+    bool gpu_buffers_ = false;
+    uint64_t gpu_dev_ = 0;
+    int fd_socket_ = -1;
+    uint32_t next_fd_token_ = 0;
+    // Hands a file descriptor to the core (a socket in the surface directory):
+    // the token names it in the next message, 0 on failure.
+    uint32_t send_fd(int fd);
     std::map<std::string, LentSurface> lent_;
     std::map<int, std::function<void()>> watched_;
     friend class Surface;

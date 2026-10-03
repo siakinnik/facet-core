@@ -32,6 +32,26 @@ public:
         }
     }
 
+    // Same, as runs: f(x0, x1, y, coverage) for pixels [x0, x1) of row y.
+    // Inside a shape no edge touches the accumulator, so long runs share one
+    // coverage and can be filled at once.
+    template <class F>
+    void for_each_span(F&& f) const {
+        for (int y = 0; y < h_; ++y) {
+            const float* row = &acc_[size_t(y) * stride_];
+            float sum = 0;
+            int x = 0;
+            while (x < w_) {
+                sum += row[x];
+                int end = x + 1;
+                while (end < w_ && row[end] == 0.f) ++end;
+                float c = std::fabs(sum);
+                if (c > 0.0015f) f(x, end, y, c > 1.f ? 1.f : c);
+                x = end;
+            }
+        }
+    }
+
 private:
     void line_clipped(Point a, Point b);
 

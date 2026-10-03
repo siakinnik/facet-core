@@ -74,12 +74,28 @@ struct Failure {
 };
 
 // A plugin's Surface: its shared memory, mapped read-only.
+// A GPU buffer (dma-buf) a plugin attached to a surface (SDK Surface::attach_buffer).
+struct GpuBuffer {
+    int fd = -1;
+    uint32_t format = 0;
+    uint64_t modifier = 0;
+    uint32_t offset = 0, stride = 0;
+    uint32_t generation = 0;  // new for every attach
+    int w = 0, h = 0;          // at most the surface's size: covers its top left part
+};
+
 struct SurfaceBuffer {
+    static constexpr int kGpuSlots = 8;
     int w = 0, h = 0, stride = 0, buffers = 0;
     int current = -1;  // buffer shown now, -1 before the first frame
     const uint8_t* map = nullptr;
     size_t size = 0;
     std::string lent_to;  // shown by this consumer module instead of the owner, "" = own
+    uint32_t generation = 0;  // new buffer file (recreated or resized)
+    bool ack_pending = false;  // GPU mode: surface_shown waits until the GPU took the frame
+    GpuBuffer gpu[kGpuSlots];
+    int gpu_current = -1;  // GPU buffer shown instead of the shared memory, -1 = none
+    int shown_w = 0, shown_h = 0;  // size of what the last frame covers (layout follows it)
     const uint32_t* pixels() const {
         return current < 0 ? nullptr
                            : reinterpret_cast<const uint32_t*>(map + size_t(current) * size_t(stride) * size_t(h));
@@ -101,6 +117,11 @@ struct Plugin {
     pid_t pid = -1;
     int fd_in = -1, fd_out = -1, fd_err = -1;
     std::string rbuf, ebuf, wbuf;
+    // GPU buffers arrive as file descriptors through a socket in the surface
+    // directory (".fds"), each with a token the next surface_buffer names.
+    int fds_listen = -1;
+    std::vector<int> fds_conns;
+    std::map<uint32_t, int> fd_tokens;
     int bad_lines = 0;
 
     double started_at = 0, last_pong = 0, next_ping = 0, deadline = 0, restart_at = 0;
@@ -240,6 +261,22 @@ public:
     SurfaceRef find_surface(const Plugin& viewer, const std::string& id) const;
     // Pixels at the bottom of the plugin's full-screen surface covered by the keyboard.
     void send_insets(const std::string& id, int bottom);
+    // The file holding a plugin's surface buffers (for the GPU helper).
+    std::string surface_file(const std::string& owner, const std::string& id) const;
+
+    // GPU composition: a surface frame is acknowledged (surface_shown) only
+    // once the GPU has taken it, and frames of surfaces alone do not mark the
+    // UI as changed (take_surface_frames() reports them instead).
+    void set_gpu_layers(bool on) { gpu_layers_ = on; }
+    // The GPU can show plugins' GPU buffers: offered to plugins in their hello,
+    // with the graphics card's render node and device number.
+    void set_gpu_buffers(bool on, const std::string& render_node, uint64_t device) {
+        gpu_buffers_ = on;
+        gpu_node_ = render_node;
+        gpu_dev_ = device;
+    }
+    bool take_surface_frames();
+    void ack_surface(const std::string& owner, const std::string& id);
 
     // Screen policy from a running plugin with display.power, if any; wake
     // locks and ringing calls force the screen on.
@@ -290,6 +327,8 @@ private:
     void on_exit(Plugin& p, int status, double now);
     void crash(Plugin& p, i18n::Text reason, double now);
     void close_fds(Plugin& p);
+    void receive_fds(Plugin& p);  // accepts and reads the plugin's fd socket
+    static void close_gpu(SurfaceBuffer& s);
 
     Config& config_;
     std::vector<std::unique_ptr<Plugin>> plugins_;
@@ -304,6 +343,10 @@ private:
     NotificationCenter notifications_;
     double wake_until_ = 0;
     std::vector<WaylandClient> wayland_clients_;
+    bool gpu_layers_ = false, surface_frames_ = false, gpu_buffers_ = false;
+    std::string gpu_node_;
+    uint64_t gpu_dev_ = 0;
+    uint32_t next_generation_ = 0;
 };
 
 }  // namespace facet::plugins

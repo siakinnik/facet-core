@@ -40,9 +40,10 @@ struct Spec {
     std::vector<std::string> env;  // "KEY=value", the complete environment
     std::string surface_dir;       // host path, mounted read-write at /run/facet/surface
     struct Bind {
-        std::string host, inside;  // read-write; `inside` is an absolute path in the container
+        std::string host, inside;  // `inside` is an absolute path in the container
+        bool read_only = false;
     };
-    std::vector<Bind> binds;  // capability endpoints (see endpoint_dir())
+    std::vector<Bind> binds;  // capability endpoints (see endpoint_dir()), the OpenGL package
 };
 
 // Host directory (on tmpfs) where a plugin's Surface buffers live; emptied
@@ -60,6 +61,8 @@ std::string endpoint_dir(const std::string& provider, const std::string& capabil
 // Creates the directory (and parents) owned by `uid` (0 = leave the owner), mode 0755.
 bool prepare_endpoint_dir(const std::string& dir, uid_t uid);
 constexpr const char* kProvidesInContainer = "/run/facet/provides";
+// Where plugins with the "gpu" permission find the installed OpenGL package (read-only).
+constexpr const char* kGlInContainer = "/run/facet/gl";
 constexpr const char* kRequiresInContainer = "/run/facet/requires";
 
 // True when containers can be used: Facet runs as root and FACET_SANDBOX is

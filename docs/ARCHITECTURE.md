@@ -513,18 +513,61 @@ device. Plugins inherit it at start and get `timezone` messages on change;
 
 ## 8. Graphics
 
-Everything is rendered in software into our own XRGB8888 buffer:
+On the CPU the UI is rendered in software into our own XRGB8888 buffer:
 
 - a signed-area accumulation rasterizer (analytic anti-aliasing) shared by
-  glyphs, rounded rectangles, circles and icons;
+  glyphs, rounded rectangles, circles and icons; shapes are filled in spans
+  of equal coverage, and rounded rectangles only rasterize their corner rows;
 - a TrueType parser (`glyf`, `cmap` 4/12, composite glyphs) with a glyph
-  cache per (glyph, px);
-- output: `fbdev` (32/16 bpp) on devices, `x11` for development, `headless`
-  for scripted tests.
+  cache per (glyph, px).
 
-No dependencies besides libc (and libX11 for the dev window). A DRM/KMS
-backend fits behind the same `Platform` interface. Known gap: every frame is
-redrawn in full, which is slow on 4K panels; dirty-region rendering is next.
+With the GPU the same drawing calls are recorded instead (`gfx::Recorder`,
+records in `src/gfx/ops.h`) and drawn by the helper, so the core spends a
+fraction of a millisecond per frame:
+
+- rectangles and rounded rectangles (and circles) become quads drawn by a
+  shader with the same anti-aliasing (covered area at straight edges,
+  distance at corners);
+- glyphs and vector shapes (icons) are rasterized once by the core and kept
+  as alpha masks in atlas pages the helper holds; the core decides where
+  they go and uploads each only once (again after a helper restart, or when
+  the atlas fills up, between frames);
+- plugin surfaces are drawn in order with the rest, no holes needed;
+- clips are applied per pixel in the shader, like the CPU's clip.
+
+Output backends:
+
+- `fbdev` (32/16 bpp): the default, works everywhere ("maximum
+  compatibility"); plugin surfaces are copied into the canvas.
+- `gpu` (optional, Settings > Graphics): the screen is driven by a helper
+  process, `facet-gpu`, through DRM/KMS with OpenGL ES. The core stays a
+  static binary that cannot load GPU drivers, so the helper and Mesa come in
+  a separate **OpenGL package** (`facet-gl-<version>-linux-<arch>.tar.gz`,
+  built by `scripts/build-gl.sh` from Ubuntu 22.04 packages with every
+  release). Facet downloads it on demand (system `curl`/`wget`, `tar`) and
+  installs it only if its SHA-256 matches the one compiled into the release.
+  When a supported card is found, Facet offers the download once (first
+  start, or the first start after updating from an older version); the user
+  can decline and switch later. The user also picks the card.
+  - The commands go through shared memory; a helper without them (older
+    packages, or `FACET_GPU_OPS=0`) gets the CPU-drawn canvas instead, with
+    plugin surfaces under its see-through holes (`Canvas::punch`). Plugin
+    surfaces are never copied by the core: the helper maps their buffer
+    files. When only a surface changed, the core does not redraw its UI at
+    all: the helper draws the last commands again.
+  - A surface frame is acknowledged to its plugin (`surface_shown`) only once
+    the helper has uploaded it, so a plugin never overwrites pixels in use.
+  - One frame is in flight at a time, paced by page flips.
+  - If the helper cannot start, Facet falls back to `fbdev` and says why in
+    Settings > Graphics; after repeated crashes it stays on the CPU (marker
+    `gl/failed`) until the user tries again.
+  - Protocol: `src/gpu/channel.h`; the helper runs without a screen in tests
+    (`--offscreen`, `scripts/ci/gpu-smoke.py`).
+- `x11` for development, `headless` for scripted tests.
+
+No dependencies besides libc (and libX11 for the dev window; Mesa only in
+the optional package). Known gap: on the CPU the UI is still redrawn in full
+when it changes; dirty regions are next.
 
 ## 9. Not in scope yet
 

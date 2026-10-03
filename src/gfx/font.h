@@ -22,6 +22,8 @@ class Font {
 public:
     bool load(const std::string& path);
     const std::string& path() const { return path_; }
+    // Changes with every load: tells cached glyphs of different fonts apart.
+    uint32_t id() const { return id_; }
 
     const Glyph& glyph(uint32_t codepoint, int px);
     float measure(std::string_view utf8, int px);
@@ -45,6 +47,7 @@ private:
     uint32_t u32(uint32_t o) const { return uint32_t(u16(o)) << 16 | u16(o + 2); }
 
     std::string path_;
+    uint32_t id_ = 0;
     std::vector<uint8_t> data_;
     uint32_t cmap_ = 0, glyf_ = 0, loca_ = 0, hmtx_ = 0;
     uint32_t cmap_format_ = 0;

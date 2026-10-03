@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -13,6 +15,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 namespace facet::sdk {
@@ -249,6 +252,7 @@ bool Surface::create(Plugin& plugin, const std::string& id, int width, int heigh
     h_ = height;
     back_ = 0;
     waiting_ = false;
+    shown_gpu_ = -1;
     map_ = map;
     size_ = size;
     plugin.surfaces_[id] = this;
@@ -292,6 +296,87 @@ void Surface::present() {
     plugin_->send(msg);
     waiting_ = true;  // until the core has taken it
     back_ ^= 1;
+}
+
+bool Surface::attach_buffer(int slot, int dmabuf_fd, uint32_t drm_format, uint64_t modifier, uint32_t offset,
+                            uint32_t stride, int width, int height) {
+    if (!map_ || !plugin_->gpu_buffers_ || slot < 0 || slot >= kMaxGpuBuffers || dmabuf_fd < 0) return false;
+    uint32_t token = plugin_->send_fd(dmabuf_fd);
+    if (!token) return false;
+    Json msg = Json::object();
+    msg["t"] = "surface_buffer";
+    msg["id"] = id_;
+    msg["slot"] = slot;
+    msg["token"] = double(token);
+    msg["format"] = double(drm_format);
+    msg["mod_hi"] = double(uint32_t(modifier >> 32));
+    msg["mod_lo"] = double(uint32_t(modifier));
+    msg["offset"] = double(offset);
+    msg["stride"] = double(stride);
+    if (width > 0 && height > 0) {
+        msg["w"] = width;
+        msg["h"] = height;
+    }
+    plugin_->send(msg);
+    return true;
+}
+
+void Surface::detach_buffer(int slot) {
+    if (!map_ || slot < 0 || slot >= kMaxGpuBuffers) return;
+    Json msg = Json::object();
+    msg["t"] = "surface_buffer_drop";
+    msg["id"] = id_;
+    msg["slot"] = slot;
+    plugin_->send(msg);
+}
+
+void Surface::present_buffer(int slot) {
+    if (!map_ || waiting_ || slot < 0 || slot >= kMaxGpuBuffers) return;
+    Json msg = Json::object();
+    msg["t"] = "surface_frame";
+    msg["id"] = id_;
+    msg["gpu"] = slot;
+    plugin_->send(msg);
+    waiting_ = true;
+}
+
+uint32_t Plugin::send_fd(int fd) {
+    if (fd_socket_ < 0) {
+        if (surface_dir_.empty()) return 0;
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::string path = surface_dir_ + "/.fds";
+        if (path.size() >= sizeof addr.sun_path) return 0;
+        std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+        int s = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);  // one message per fd
+        if (s < 0) return 0;
+        if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
+            ::close(s);
+            return 0;
+        }
+        fd_socket_ = s;
+    }
+    uint32_t token = ++next_fd_token_;
+    char line[16];
+    int n = std::snprintf(line, sizeof line, "%u\n", token);
+    iovec iov{line, size_t(n)};
+    alignas(cmsghdr) char ctrl[CMSG_SPACE(sizeof(int))] = {};
+    msghdr mh{};
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = ctrl;
+    mh.msg_controllen = sizeof ctrl;
+    cmsghdr* cm = CMSG_FIRSTHDR(&mh);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type = SCM_RIGHTS;
+    cm->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(cm), &fd, sizeof(int));
+    if (::sendmsg(fd_socket_, &mh, MSG_NOSIGNAL) != n) {
+        ::close(fd_socket_);
+        fd_socket_ = -1;
+        return 0;
+    }
+    return token;
 }
 
 void Plugin::text_input(bool active, const std::string& mode) {
@@ -569,6 +654,10 @@ void Plugin::handle(const Json& msg) {
         screen_w_ = msg["screen"]["w"].as_int();
         screen_h_ = msg["screen"]["h"].as_int();
         endpoints_ = msg["endpoints"];
+        gl_dir_ = msg["gl_dir"].str();
+        gpu_buffers_ = msg["gpu_buffers"].as_bool(false);
+        gpu_device_ = msg["gpu_device"].str();
+        gpu_dev_ = uint64_t(msg["gpu_dev"].as_number(0));
         lent_.clear();
         catalog_.set_language(i18n::normalize(msg["locale"].str()));
         if (msg["timezone"].is_string()) apply_timezone(msg["timezone"].str());
@@ -600,7 +689,10 @@ void Plugin::handle(const Json& msg) {
         if (on_permission) on_permission(name, granted);
     } else if (t == "surface_shown") {
         auto it = surfaces_.find(msg["id"].str());
-        if (it != surfaces_.end()) it->second->waiting_ = false;
+        if (it != surfaces_.end()) {
+            it->second->waiting_ = false;
+            it->second->shown_gpu_ = msg["gpu"].as_int(-1);
+        }
     } else if (t == "touch") {
         if (on_touch)
             on_touch(msg["surface"].str(), msg["kind"].str(), float(msg["x"].as_number()), float(msg["y"].as_number()));

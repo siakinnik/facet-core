@@ -4,6 +4,7 @@
 #include <sys/wait.h>
 
 #include <algorithm>
+#include <iterator>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -335,6 +336,11 @@ void App::draw_settings(double) {
     }
     if (ui_.select("language", tr("Language"), lang_names, lang_index)) set_language(languages()[size_t(lang_index)].code);
 
+    {
+        std::string now = layers_ ? tr("graphics card") : tr("processor");
+        if (ui_.link("graphics", tr("Graphics"), now)) navigate(View::Graphics);
+    }
+
     draw_timezone_settings();
 
     // Keyboard: built-in or any installed keyboard plugin.
@@ -596,6 +602,95 @@ void App::draw_app_info(double t) {
     ui_.end_screen();
 }
 
+void App::draw_graphics() {
+    if (ui_.begin_screen("graphics", tr("Graphics")) == ui::HeaderHit::Back) navigate(View::Settings);
+    const bool want_gpu = config_.get_str("graphics", "cpu") == "gpu";
+    gpu::GlPackage::Status st = gl_->status();
+    const std::string installed = gl_->installed();
+
+    ui_.section(tr("Drawing"));
+    ui_.info(tr("Now"), layers_ ? tr("graphics card") : tr("processor"), layers_ ? ui::Tone::Good : ui::Tone::Normal);
+    int mode = want_gpu ? 1 : 0;
+    if (ui_.select("gfxmode", tr("Draw with"), {tr("Processor (works everywhere)"), tr("Graphics card (OpenGL)")},
+                   mode)) {
+        config_.set("graphics", mode == 1 ? "gpu" : "cpu");
+        if (mode == 1 && installed.empty() && gl_->available()) gl_->install();
+        restart_needed_ = true;
+    }
+    const std::string& failure = platform::gpu_failure();
+    if (want_gpu && !layers_ && !failure.empty()) {
+        ui_.info(tr("Graphics card unavailable"), failure, ui::Tone::Bad);
+        if (ui_.button("gfxretry", tr("Try again"))) {
+            ::remove((paths::data_root() + "/gl/failed").c_str());
+            request_restart();
+        }
+    }
+
+    ui_.section(tr("Graphics card"));
+    if (gpus_.empty()) {
+        ui_.note(tr("No graphics card found: Facet draws with the processor."));
+    } else {
+        std::vector<std::string> names;
+        int sel = 0;
+        std::string card = config_.get_str("graphics_card", "");
+        for (size_t i = 0; i < gpus_.size(); ++i) {
+            names.push_back(gpus_[i].name() + (gpus_[i].supported ? "" : " — " + tr("not supported")));
+            if (gpus_[i].card == card) sel = int(i);
+        }
+        if (ui_.select("gfxcard", tr("Use"), names, sel)) {
+            config_.set("graphics_card", gpus_[size_t(sel)].card);
+            restart_needed_ = true;
+        }
+        static const int kVram[] = {0, 256, 512, 1024, 2048};
+        std::vector<std::string> limits = {tr("No limit")};
+        int vsel = 0, vram = config_.get_int("graphics_vram_mb", 0);
+        for (size_t i = 1; i < std::size(kVram); ++i) {
+            limits.push_back(tr("{} MB", {std::to_string(kVram[i])}));
+            if (kVram[i] == vram) vsel = int(i);
+        }
+        if (ui_.select("gfxvram", tr("Video memory for Facet"), limits, vsel)) {
+            config_.set("graphics_vram_mb", kVram[vsel]);
+            vram_budget_ = uint64_t(kVram[vsel]) << 20;
+            dirty_ = true;
+        }
+        if (layers_) ui_.info(tr("Screen buffers"), tr("{} MB", {std::to_string(vram_base() >> 20)}));
+        ui_.note(tr("Over the limit, app windows are copied by the processor."));
+    }
+
+    ui_.section(tr("OpenGL drivers"));
+    if (gl_->busy()) {
+        const char* what = st.phase == gpu::GlPackage::Phase::Downloading ? "Downloading"
+                           : st.phase == gpu::GlPackage::Phase::Verifying ? "Checking the download"
+                                                                          : "Unpacking";
+        ui_.level(tr(what), float(st.progress), std::to_string(int(st.progress * 100)) + "%");
+        if (ui_.button("glcancel", tr("Cancel"))) gl_->cancel();
+    } else if (!installed.empty()) {
+        ui_.info(tr("Installed"), installed, ui::Tone::Good);
+        if (ui_.button("glremove", tr("Remove OpenGL and its settings"), ui::ButtonStyle::Danger)) {
+            // The drivers, their shader cache and every graphics setting; drawing with the processor again.
+            gl_->remove();
+            config_.set("graphics", "cpu");
+            config_.set("graphics_card", "");
+            config_.set("graphics_vram_mb", 0);
+            restart_needed_ = layers_;
+        }
+    } else if (gl_->available()) {
+        ui_.info(tr("Installed"), tr("no"));
+        std::string mb = std::to_string((gl_->size() + 500000) / 1000000);
+        if (ui_.button("glinstall", tr("Download OpenGL ({} MB)", {mb}), ui::ButtonStyle::Primary)) gl_->install();
+    } else {
+        ui_.note(tr("The OpenGL drivers are published with release versions of Facet."));
+    }
+    if (st.phase == gpu::GlPackage::Phase::Failed) ui_.info(tr("Error"), st.error, ui::Tone::Bad);
+
+    if (restart_needed_) {
+        ui_.section({});
+        ui_.note(tr("The change applies after a restart of Facet."));
+        if (ui_.button("gfxrestart", tr("Restart now"), ui::ButtonStyle::Primary)) request_restart();
+    }
+    ui_.end_screen();
+}
+
 // Draws a plugin's declarative UI tree with the same widgets as built-in
 // screens. Changes are applied locally at once, then sent as events.
 void App::render_plugin_ui(plugins::Plugin& p) {
@@ -701,8 +796,31 @@ void App::draw_surface(plugins::Plugin& p, const std::string& id, const Rect& r)
     }
     const plugins::SurfaceBuffer* sb = s.buffer;
     surface_owners_.push_back(s.owner->m.id);
-    ui_.canvas().draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, r);
+    put_surface(s, id, r, ui_.canvas().clip());
     track_surface_touch(s.owner->m.id, id, r.intersect(ui_.canvas().clip()), sb->w, sb->h, false);
+}
+
+// The surface's pixels into `dst`: copied into the canvas, or (GPU) left to
+// the GPU, which draws them under a see-through hole in the canvas.
+void App::put_surface(const plugins::SurfaceRef& s, const std::string& id, const Rect& dst, const Rect& clip) {
+    const plugins::SurfaceBuffer* sb = s.buffer;
+    if (layers_) {
+        uint64_t bytes = uint64_t(sb->w) * uint64_t(sb->h) * 4;
+        if (vram_budget_ == 0 || frame_vram_ + bytes <= vram_budget_) {
+            frame_vram_ += bytes;
+            if (ops_) {
+                canvas_.push_clip(clip);
+                canvas_.draw_layer(uint32_t(layer_refs_.size()));
+                canvas_.pop_clip();
+            } else {
+                canvas_.punch(dst);
+            }
+            layer_refs_.push_back({s.owner->m.id, id, dst, dst.intersect(clip)});
+            return;
+        }
+        cpu_surfaces_.emplace_back(s.owner->m.id, id);  // over the limit: copied like without a GPU
+    }
+    canvas_.draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, dst);
 }
 
 // The plugin's pixels on the whole screen. The top edge stays Facet's: a
@@ -716,8 +834,7 @@ void App::draw_fullscreen_surface(const plugins::SurfaceRef& s, const std::strin
     // The keyboard covers the bottom: the owner may move its content above it.
     float covered = kb_.visible && kb_.surface_owner == owner ? std::max(0.f, H - kb_rect_.y) : 0.f;
     host_.send_insets(owner, int(std::lround(covered * float(sb->h) / H)));
-    canvas_.fill_rect({0, 0, W, H}, gfx::Color{0, 0, 0, 255});
-    canvas_.draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, {0, 0, W, H});
+    put_surface(s, id, {0, 0, W, H}, {0, 0, W, H});
     float pw = t.dp(56), ph = t.dp(5);
     canvas_.fill_round_rect({(W - pw) / 2, t.dp(6), pw, ph}, ph / 2, gfx::Color{255, 255, 255, 110});
     track_surface_touch(owner, id, {0, 0, W, H}, sb->w, sb->h, true);

@@ -61,7 +61,7 @@ gfx::Rect App::banner_rect() const {
 }
 
 bool App::modal_active(double t) {
-    return host_.pending_prompt() || host_.notifications().ringing(t);
+    return host_.pending_prompt() || host_.notifications().ringing(t) || gfx_dialog_ != GfxDialog::None;
 }
 
 // Called before the screen is drawn: what part of the screen belongs to overlays.
@@ -90,10 +90,159 @@ void App::draw_overlays(double t) {
         draw_permission_prompt(*q, t);
     } else if (plugins::Notification* call = host_.notifications().ringing(t)) {
         draw_call(*call, t);
+    } else if (gfx_dialog_ != GfxDialog::None) {
+        draw_gfx_dialog();
     } else if (banner_ && !kb_.visible) {
         draw_banner(t);
     }
     ui_.end_overlay();
+}
+
+std::string App::draw_dialog(const std::string& key, const std::string& title, const std::string& text,
+                             const std::vector<std::pair<std::string, std::string>>& buttons) {
+    const Theme& th = theme_;
+    float W = float(canvas_.width()), H = float(canvas_.height());
+    canvas_.fill_rect({0, 0, W, H}, th.c.bg.alpha(0.85f));
+    float w = std::min(W - th.dp(32), th.dp(560));
+    auto lines = ui_.wrap(FontRole::Medium, 22, title, w - th.dp(48));
+    auto body = ui_.wrap(FontRole::Regular, Theme::kSmall, text, w - th.dp(48));
+    float bh = th.dp(56), gap = th.dp(10);
+    float h = th.dp(28) + float(lines.size()) * th.dp(32) + th.dp(8) + float(body.size()) * th.dp(22) + th.dp(22) +
+              float(buttons.size()) * (bh + gap) + th.dp(14);
+    Rect card{(W - w) / 2, (H - h) / 2, w, h};
+    canvas_.fill_round_rect(card, th.dp(Theme::kRadius + 6), th.c.surface);
+    float y = card.y + th.dp(28);
+    for (const auto& l : lines) {
+        ui_.text(FontRole::Medium, 22, {card.x + th.dp(24), y, w - th.dp(48), th.dp(32)}, l, th.c.text, Align::Center);
+        y += th.dp(32);
+    }
+    y += th.dp(8);
+    for (const auto& l : body) {
+        ui_.text(FontRole::Regular, Theme::kSmall, {card.x + th.dp(24), y, w - th.dp(48), th.dp(22)}, l, th.c.text_dim,
+                 Align::Center);
+        y += th.dp(22);
+    }
+    y += th.dp(22);
+    std::string clicked;
+    for (size_t i = 0; i < buttons.size(); ++i) {
+        Rect b{card.x + th.dp(20), y, w - th.dp(40), bh};
+        ui::Context::Press pr = ui_.press(key + ":" + buttons[i].first, b);
+        bool primary = i == 0;
+        Color bg = primary ? th.c.accent : th.c.surface_pressed;
+        if (pr.held) bg = gfx::mix(bg, th.c.text, 0.12f);
+        canvas_.fill_round_rect(b, bh / 2, bg);
+        ui_.text(FontRole::Medium, Theme::kBody, b, buttons[i].second, primary ? th.c.on_accent : th.c.text,
+                 Align::Center);
+        if (pr.clicked) clicked = buttons[i].first;
+        y += bh + gap;
+    }
+    return clicked;
+}
+
+// Offered once (on the first start and after updating from a version
+// without GPU support) when a supported graphics card is there, and again
+// as "restart?" once the download is done.
+void App::update_gfx_dialog() {
+    if (view_ != View::Menu || gfx_dialog_ != GfxDialog::None) return;
+    gpu::GlPackage::Status st = gl_->status();
+    if (st.phase == gpu::GlPackage::Phase::Done) {
+        gl_->acknowledge();
+        if (config_.get_str("graphics", "cpu") == "gpu" && !layers_) gfx_dialog_ = GfxDialog::Restart;
+    } else if (st.phase == gpu::GlPackage::Phase::Failed) {
+        gl_->acknowledge();
+    }
+    if (gfx_dialog_ != GfxDialog::None || config_.get_bool("graphics_offered", false) || layers_ || gl_->busy() ||
+        (!gl_->available() && gl_->installed().empty()))
+        return;
+    for (const auto& g : gpus_)
+        if (g.supported) {
+            gfx_dialog_ = GfxDialog::Offer;
+            dirty_ = true;
+            return;
+        }
+}
+
+// The choices are made: download the drivers (the restart is offered when
+// they are there) or, when they are installed already, restart now.
+void App::finish_gfx_setup() {
+    config_.set("graphics_offered", true);
+    config_.set("graphics", "gpu");
+    gfx_dialog_ = GfxDialog::None;
+    dirty_ = true;
+    if (gl_->installed().empty()) gl_->install();
+    else gfx_dialog_ = GfxDialog::Restart;
+}
+
+void App::draw_gfx_dialog() {
+    if (gfx_dialog_ == GfxDialog::Offer) {
+        std::string cards;
+        for (const auto& g : gpus_)
+            if (g.supported) cards += (cards.empty() ? "" : ", ") + g.name();
+        const bool have = !gl_->installed().empty();
+        std::string mb = std::to_string((gl_->size() + 500000) / 1000000);
+        std::string text =
+            tr("Facet found a graphics card: {}. With it, the interface and apps run smoother and the processor is "
+               "freed. The processor works on every device. You can change this later in Settings > Graphics.",
+               {cards});
+        if (!have) text += " " + tr("The graphics card needs the OpenGL drivers, downloaded from the internet ({} MB).", {mb});
+        std::string c = draw_dialog("gfxoffer", tr("How should Facet draw?"), text,
+                                    {{"yes", have ? tr("Graphics card") : tr("Graphics card (download {} MB)", {mb})},
+                                     {"no", tr("Processor")}});
+        if (c.empty()) return;
+        dirty_ = true;
+        if (c == "yes") {
+            gfx_dialog_ = GfxDialog::Card;
+            return;
+        }
+        config_.set("graphics_offered", true);
+        gfx_dialog_ = GfxDialog::None;
+    } else if (gfx_dialog_ == GfxDialog::Card) {
+        std::vector<std::pair<std::string, std::string>> buttons;
+        std::string unsupported;
+        for (size_t i = 0; i < gpus_.size(); ++i) {
+            if (gpus_[i].supported) buttons.push_back({std::to_string(i), gpus_[i].name()});
+            else unsupported += (unsupported.empty() ? "" : ", ") + gpus_[i].name() + " (" + gpus_[i].driver + ")";
+        }
+        buttons.push_back({"back", tr("Back")});
+        std::string text = tr("Facet draws with this card. You can pick another one later in Settings > Graphics.");
+        if (!unsupported.empty()) text += " " + tr("Not supported: {}.", {unsupported});
+        std::string c = draw_dialog("gfxcard", tr("Which graphics card?"), text, buttons);
+        if (c.empty()) return;
+        dirty_ = true;
+        if (c == "back") {
+            gfx_dialog_ = GfxDialog::Offer;
+            return;
+        }
+        config_.set("graphics_card", gpus_[size_t(std::stoi(c))].card);
+        gfx_dialog_ = GfxDialog::Memory;
+    } else if (gfx_dialog_ == GfxDialog::Memory) {
+        std::string c = draw_dialog(
+            "gfxvram", tr("How much video memory?"),
+            tr("The most video memory Facet may use for its picture. Over it, app windows are copied by the "
+               "processor."),
+            {{"0", tr("No limit (recommended)")},
+             {"256", tr("{} MB", {"256"})},
+             {"512", tr("{} MB", {"512"})},
+             {"1024", tr("{} MB", {"1024"})},
+             {"back", tr("Back")}});
+        if (c.empty()) return;
+        dirty_ = true;
+        if (c == "back") {
+            gfx_dialog_ = GfxDialog::Card;
+            return;
+        }
+        config_.set("graphics_vram_mb", std::stoi(c));
+        finish_gfx_setup();
+    } else if (gfx_dialog_ == GfxDialog::Restart) {
+        std::string c = draw_dialog("gfxrestart", tr("OpenGL is ready"),
+                                    tr("Facet restarts to draw with the graphics card. It takes a few seconds."),
+                                    {{"now", tr("Restart now")}, {"later", tr("Later")}});
+        if (c.empty()) return;
+        gfx_dialog_ = GfxDialog::None;
+        dirty_ = true;
+        if (c == "now") request_restart();
+        else restart_needed_ = true;
+    }
 }
 
 // Transient permissions in use: a small icon in the top right corner of
