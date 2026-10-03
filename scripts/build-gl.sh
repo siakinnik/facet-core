@@ -2,8 +2,13 @@
 # Builds the OpenGL package Facet downloads on demand (Settings > Graphics):
 # the GPU helper (facet-gpu) and Mesa's drivers with every library they need
 # beyond glibc and libstdc++, from Ubuntu 22.04 (glibc 2.35: runs on any newer
-# host), plus their licenses.
+# host), plus their licenses and the list of the Ubuntu packages they come
+# from (licenses/SOURCES).
 #   scripts/build-gl.sh <out-dir> <version> [arch]
+# FACET_GL_SOURCES=1 also writes facet-gl-<version>-sources.tar: the Ubuntu
+# source packages of all of it (the LGPL parts must be offered with the
+# binaries); FACET_GL_SOURCES=only writes just that, e.g. for a release
+# published without it (the versions must still be the ones in the archive).
 # Runs in an ubuntu:22.04 Docker container (other architectures through
 # QEMU), or directly when already on Ubuntu 22.04 as root.
 set -euo pipefail
@@ -20,7 +25,8 @@ case "$arch" in
 esac
 
 if [[ "${FACET_GL_INSIDE:-}" != 1 ]] && ! { grep -q '^VERSION_CODENAME=jammy' /etc/os-release && [[ $(uname -m) == "${arch/armv7/armv7l}" && $EUID == 0 ]]; }; then
-    docker run --rm --platform "$platform" -e FACET_GL_INSIDE=1 -v "$root:/src:ro" -v "$out:/out" ubuntu:22.04 \
+    docker run --rm --platform "$platform" -e FACET_GL_INSIDE=1 -e FACET_GL_SOURCES="${FACET_GL_SOURCES:-}" \
+        -v "$root:/src:ro" -v "$out:/out" ubuntu:22.04 \
         bash /src/scripts/build-gl.sh /out "$version" "$arch"
     exit
 fi
@@ -53,16 +59,38 @@ done | sort -u | while read -r soname path; do
     [[ "$soname" =~ $skip ]] && continue
     [[ -e "$stage/lib/$soname" ]] && continue
     cp -L "$path" "$stage/lib/$soname"
-    pkg="$(dpkg -S "$(readlink -f "$path")" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+    # dpkg knows a file by the path it was installed at: /lib/... on merged-/usr systems.
+    real="$(readlink -f "$path")"
+    pkg="$( (dpkg -S "$real" || dpkg -S "${real#/usr}") 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+    [[ -n "$pkg" ]] && echo "$pkg" >> "$work/packages"
     [[ -n "$pkg" && -f /usr/share/doc/$pkg/copyright ]] && cp /usr/share/doc/$pkg/copyright "$stage/licenses/$pkg.copyright"
 done
 for pkg in libgl1-mesa-dri libegl-mesa0; do
+    echo "$pkg" >> "$work/packages"
     cp /usr/share/doc/$pkg/copyright "$stage/licenses/$pkg.copyright"
 done
+# Binary package, its version, and the source package it is built from.
+sort -u "$work/packages" | while read -r pkg; do
+    dpkg-query -W -f='${Package} ${Version} ${source:Package} ${source:Version}\n' "$pkg"
+done > "$stage/licenses/SOURCES"
 mesa="$(dpkg-query -W -f='${Version}' libgl1-mesa-dri)"
 echo "$version (Mesa $mesa)" > "$stage/VERSION"
 
-name="facet-gl-$version-linux-$arch.tar.gz"
-tar -C "$work/stage" -czf "$out/$name" facet-gl
-echo "$out/$name ($(du -h "$out/$name" | cut -f1), unpacked $(du -sh "$stage" | cut -f1))"
+if [[ "${FACET_GL_SOURCES:-}" != only ]]; then
+    name="facet-gl-$version-linux-$arch.tar.gz"
+    tar -C "$work/stage" -czf "$out/$name" facet-gl
+    echo "$out/$name ($(du -h "$out/$name" | cut -f1), unpacked $(du -sh "$stage" | cut -f1))"
+fi
+if [[ -n "${FACET_GL_SOURCES:-}" ]]; then
+    # The exact versions packed above, from Ubuntu's source archive.
+    sed -i 's/^# *deb-src /deb-src /' /etc/apt/sources.list
+    apt-get update -qq
+    mkdir -p "$work/src/facet-gl-$version-sources"
+    cp "$stage/licenses/SOURCES" "$work/src/facet-gl-$version-sources/"
+    (cd "$work/src/facet-gl-$version-sources" &&
+        awk '{print $3 "=" $4}' SOURCES | sort -u | xargs apt-get source --download-only -qq)
+    name="facet-gl-$version-sources.tar"
+    tar -C "$work/src" -cf "$out/$name" "facet-gl-$version-sources"
+    echo "$out/$name ($(du -h "$out/$name" | cut -f1))"
+fi
 rm -rf "$work"

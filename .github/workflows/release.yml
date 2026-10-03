@@ -71,12 +71,15 @@ jobs:
       - uses: docker/setup-qemu-action@v3
 
       - name: Build the OpenGL package
+        # The source packages once (the same for every architecture).
+        env:
+          FACET_GL_SOURCES: ${{ matrix.arch == 'x86_64' && '1' || '' }}
         run: bash scripts/build-gl.sh dist "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: facet-gl-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          path: dist/*.tar*
           if-no-files-found: error
 
   build:
@@ -150,7 +153,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+        run: cd dist && sha256sum *.tar* > SHA256SUMS && cat SHA256SUMS
 
       - name: Publish release
         env:
@@ -159,8 +162,9 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           cat > notes.md <<EOF
-          Install or update on a device (x86_64, aarch64, armv7). The facet-gl archives are the OpenGL
-          drivers Facet downloads itself when the graphics card is switched on (Settings > Graphics).
+          Install or update on a device (x86_64, aarch64, armv7). The facet-gl archives are the graphics
+          drivers (Mesa, from Ubuntu 22.04) Facet downloads itself when the graphics card is switched on
+          (Settings > Graphics); their licenses are inside, the source packages in facet-gl-*-sources.tar.
 
           \`\`\`bash
           curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/get.sh | sudo bash -s -- --version ${TAG}

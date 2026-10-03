@@ -1,0 +1,35 @@
+# Adds the source packages of the OpenGL package (facet-gl-<version>-sources.tar)
+# to a release published without them. Run it soon after the release: the
+# versions come from Ubuntu's archive as it is now, so they must still be the
+# ones in the package (SOURCES in the archive lists them; the package's
+# VERSION names its Mesa).
+name: OpenGL package sources
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v0.7.0-alpha)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  sources:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      # The script from the default branch: older tags do not have this mode.
+      - uses: actions/checkout@v4
+
+      - name: Build the sources archive
+        env:
+          FACET_GL_SOURCES: only
+        run: bash scripts/build-gl.sh dist "${TAG#v}" x86_64
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/facet-gl-*-sources.tar --repo "$GITHUB_REPOSITORY" --clobber
