@@ -75,7 +75,10 @@ Canvas Keyboard::build_text(float width, float& height) const {
     size_t widest = 0;
     for (const auto& r : rows) widest = std::max(widest, r.size());
     widest = std::max<size_t>(widest, 10);
-    float kw = std::min(kMaxKeyW, (width - 2 * kPad - kGap * float(widest - 1)) / float(widest));
+    // Every row must fit, row 3 with its two wide keys (1.5 keys each) too.
+    float n3 = float(rows[2].size());
+    float kw = std::min({kMaxKeyW, (width - 2 * kPad - kGap * float(widest - 1)) / float(widest),
+                         (width - 2 * kPad - kGap * (n3 + 1)) / (n3 + 3)});
     float y = kPad;
 
     // Rows 1-2: characters, centred.

@@ -1,7 +1,7 @@
 {
   "id": "keyboard",
   "name": { "en": "Keyboard", "ru": "Клавиатура" },
-  "version": "0.3.0",
+  "version": "0.3.1",
   "api": 3,
   "exec": "keyboard",
   "permissions": ["background"],
