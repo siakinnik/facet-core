@@ -73,6 +73,9 @@ done
 sort -u "$work/packages" | while read -r pkg; do
     dpkg-query -W -f='${Package} ${Version} ${source:Package} ${source:Version}\n' "$pkg"
 done > "$stage/licenses/SOURCES"
+# The copyright files refer to the full license texts by path; they come along.
+cp -r /usr/share/common-licenses "$stage/licenses/common-licenses"
+install -m644 "$root/LICENSE" "$stage/licenses/facet-gpu.LICENSE"  # the helper: GPL-3.0
 mesa="$(dpkg-query -W -f='${Version}' libgl1-mesa-dri)"
 echo "$version (Mesa $mesa)" > "$stage/VERSION"
 

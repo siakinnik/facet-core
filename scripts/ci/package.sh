@@ -25,6 +25,9 @@ for f in LICENSE README.md; do
     [[ -f "$root/$f" ]] && install -m644 "$root/$f" "$stage/$f"
 done
 
+# The executable is static: the licenses of what is built into it, the
+# packages they come from (licenses/STATIC) and the full license texts.
+bash "$root/scripts/ci/licenses.sh" "$stage" "${CXX:-g++}" libc.a libstdc++.a libgcc_eh.a
 mkdir -p "$out"
 tar -C "$(dirname "$stage")" -czf "$out/$name.tar.gz" "$name"
 echo "$out/$name.tar.gz"

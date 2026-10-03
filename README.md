@@ -244,3 +244,19 @@ docs/           architecture and plugin protocol
 
 Writing a plugin: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the
 `facet-display-power` plugin as a template.
+
+## Licenses
+
+- This project: GPL-3.0 (LICENSE); its sources are this repository at each
+  release tag.
+- The release executables are static: the C library (glibc, LGPL-2.1-or-later) and the GCC runtime are built into them. Their
+  licenses are in every release archive under `licenses/` (the packages they
+  come from, with exact versions, in `licenses/STATIC`, and the full texts in
+  `licenses/common-licenses/`).
+- The OpenGL package (`facet-gl-*`, downloaded on demand from Settings >
+  Graphics) holds Mesa and its libraries from Ubuntu 22.04, unchanged, each
+  with its license in `licenses/`; their source packages are in
+  `facet-gl-<version>-sources.tar` next to it.
+- Every release has `facet-<version>-sources.tar` with the sources of all of
+  that. GCC's runtime (libstdc++, libgcc) is under the GCC Runtime
+  Library Exception, which asks for no sources.

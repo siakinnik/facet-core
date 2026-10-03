@@ -135,6 +135,8 @@ jobs:
         run: bash scripts/ci/smoke.sh build/facet
 
       - name: Package
+        env:
+          CXX: ${{ matrix.cxx }}
         run: bash scripts/ci/package.sh build "${{ needs.prepare.outputs.version }}" "${{ matrix.arch }}" dist
 
       - uses: actions/upload-artifact@v4
@@ -151,6 +153,23 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          path: src
+
+      # The sources of the libraries built into or shipped with the binaries
+      # (LGPL glibc, ...), published next to them.
+      - name: Sources of the bundled libraries
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p packed
+          for f in dist/facet-[0-9]*-linux-*.tar.gz; do tar -C packed -xzf "$f"; done
+          entries=()
+          while read -r f; do entries+=("host:$f"); done < <(find packed -path '*/licenses/STATIC')
+          bash src/scripts/ci/sources.sh "dist/facet-$VERSION-sources.tar" "${entries[@]}"
 
       - name: Checksums
         run: cd dist && sha256sum *.tar* > SHA256SUMS && cat SHA256SUMS
