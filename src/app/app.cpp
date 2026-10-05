@@ -500,7 +500,8 @@ void App::tick(double t) {
     }
     if ((view_ == View::Settings || view_ == View::Graphics || view_ == View::Plugin || view_ == View::Apps ||
          view_ == View::AppInfo || view_ == View::Notifications) &&
-        t - last_input_ > kIdleToMenu && !modal_active(t))
+        t - last_input_ > kIdleToMenu && !modal_active(t) &&
+        !(view_ == View::Plugin && host_.holds_wake_lock(plugin_id_)))  // watching something
         navigate(View::Menu);
     if ((view_ == View::Menu || view_ == View::Dashboard) && local_now().tm_min != drawn_minute_) dirty_ = true;
     if (net_.take_changed() && (view_ == View::Menu || view_ == View::Settings)) dirty_ = true;

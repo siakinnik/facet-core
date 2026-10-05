@@ -692,6 +692,7 @@ void Plugin::handle(const Json& msg) {
         if (it != surfaces_.end()) {
             it->second->waiting_ = false;
             it->second->shown_gpu_ = msg["gpu"].as_int(-1);
+            if (on_surface_shown) on_surface_shown(it->first);
         }
     } else if (t == "touch") {
         if (on_touch)

@@ -1310,6 +1310,12 @@ void PluginHost::set_locale(const std::string& lang) {
         if (p->state == State::Running) send(*p, msg);
 }
 
+bool PluginHost::holds_wake_lock(const std::string& id) const {
+    for (const auto& p : plugins_)
+        if (p->m.id == id) return p->state == State::Running && !p->frozen && p->wake_lock;
+    return false;
+}
+
 bool PluginHost::keyboard_ready(const std::string& id) const {
     for (const auto& p : plugins_)
         if (p->m.id == id)

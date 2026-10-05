@@ -281,6 +281,8 @@ public:
     // Screen policy from a running plugin with display.power, if any; wake
     // locks and ringing calls force the screen on.
     std::optional<bool> display_policy(double now);
+    // The plugin runs and holds a wake lock (video, a call): its screen stays.
+    bool holds_wake_lock(const std::string& id) const;
 
     // ---- Keyboard plugins (provide input.keyboard).
     bool keyboard_ready(const std::string& id) const;  // running and has drawn itself

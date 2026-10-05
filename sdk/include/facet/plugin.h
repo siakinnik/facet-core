@@ -256,6 +256,10 @@ public:
     // Pixels at the bottom of the full-screen surface the keyboard covers now
     // (0 when it is closed): move what is typed into above it.
     std::function<void(int bottom)> on_insets;
+    // The core took the last frame of a surface: Surface::ready() is true
+    // again. Whoever draws frames as fast as the screen takes them starts the
+    // next one here instead of on the next tick.
+    std::function<void(const std::string& surface)> on_surface_shown;
 
     // ---- Capability endpoints (core 0.6+). A capability declared in the
     // manifest as {"name": ..., "endpoint": true} gets a directory shared
