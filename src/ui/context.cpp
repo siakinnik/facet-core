@@ -726,8 +726,11 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     Press pr = interact(make_id(id), r);
     canvas_->fill_round_rect(r, t.dp(Theme::kRadius + 6), pr.held ? c.surface_pressed : c.surface);
     // Low tiles (many modules on a small screen) lay out sideways: the icon
-    // at the left, the title and the subtitle next to it.
-    const bool compact = r.h < t.dp(140);
+    // at the left, the title and the subtitle next to it. Upright takes
+    // 22 + 60 (icon) + 8 + 34 (title) + 24 (subtitle) + 22 = 170: below that
+    // the icon would run into the title, and the same for every tile of a
+    // grid, with a subtitle or without.
+    const bool compact = r.h < t.dp(172);
     float pad = compact ? t.dp(16) : t.dp(22);
     Color ic = tone == Tone::Normal ? c.accent : tone_color(tone);
     float cr = compact ? t.dp(24) : t.dp(30);
