@@ -239,23 +239,47 @@ void App::draw_menu() {
             Status st = module_status(*p, true);
             s.subtitle = st.text;
             s.tone = st.tone == ui::Tone::Dim ? ui::Tone::Normal : st.tone;
+        } else if (const plugins::Plugin* prov = host_.stopped_provider(*p)) {
+            // Opening it starts the module it waits for again.
+            s.subtitle = tr("Waiting for {}", {prov->m.name.get(lang)});
+            s.tone = ui::Tone::Warn;
         }
         tiles.push_back(std::move(s));
     }
 
+    // Pages of tiles, switched by swiping sideways; the build line and the
+    // attention pill below are never drawn over.
     float top = t.dp(160);
-    float avail_w = W - 2 * g, avail_h = H - top - g;
+    int attention = host_.attention_count();
+    float below = attention ? t.dp(88) : t.dp(44);
+    float avail_w = W - 2 * g;
     int cols = std::max(2, int(avail_w / t.dp(270)));
     cols = std::min<int>(cols, std::max<size_t>(2, tiles.size()));
     float gap = t.dp(16);
     float tw = (avail_w - gap * float(cols - 1)) / float(cols);
-    int rows = int((tiles.size() + size_t(cols) - 1) / size_t(cols));
-    float th = std::min(tw * 0.62f, (avail_h - gap * float(rows - 1)) / float(rows));
-    th = std::max(th, t.dp(150));
+    float full = std::max(t.dp(150), tw * 0.62f);
+    auto rows_for = [&](float h) { return std::max(1, int((h + gap) / (t.dp(112) + gap))); };
+    auto pages_for = [&](int per_page) { return int((tiles.size() + size_t(per_page) - 1) / size_t(per_page)); };
 
+    float view_h = H - below - top;
+    int rows = rows_for(view_h);
+    int pages = pages_for(cols * rows);
+    if (pages > 1) {  // room for the dots
+        view_h -= t.dp(28);
+        rows = rows_for(view_h);
+        pages = pages_for(cols * rows);
+    }
+    rows = std::min(rows, int((tiles.size() + size_t(cols) - 1) / size_t(cols)));
+    float th = std::clamp((view_h - gap * float(rows - 1)) / float(rows), t.dp(96), full);
+    int per_page = cols * rows;
+
+    Rect view{0, top - t.dp(10), W, view_h + t.dp(10) + (pages > 1 ? t.dp(28) : 0.f)};
+    float offset = ui_.begin_pages("menu", view, pages);
     for (size_t i = 0; i < tiles.size(); ++i) {
-        int col = int(i) % cols, row = int(i) / cols;
-        Rect r{g + float(col) * (tw + gap), top + float(row) * (th + gap), tw, th};
+        int page = int(i) / per_page, idx = int(i) % per_page;
+        int col = idx % cols, row = idx / cols;
+        Rect r{g + float(col) * (tw + gap) + float(page) * W - offset, top + float(row) * (th + gap), tw, th};
+        if (r.right() < 0 || r.x > W) continue;  // on another page
         const auto& s = tiles[i];
         if (ui_.tile(s.id, r, s.title, s.subtitle, s.icon, s.tone, s.badge, s.icon_ops)) {
             if (s.id == "__dashboard") {
@@ -267,11 +291,12 @@ void App::draw_menu() {
             }
         }
     }
+    ui_.end_pages(top + view_h + t.dp(14));
 
     // Modules that cannot run (incompatible, waiting for permissions, ...) are
     // announced here, also those without a tile.
-    if (int n = host_.attention_count()) {
-        std::string label = tr("Modules need attention: {}", {std::to_string(n)});
+    if (attention) {
+        std::string label = tr("Modules need attention: {}", {std::to_string(attention)});
         float lw = ui_.text_width(FontRole::Medium, Theme::kSmall, label) + t.dp(64);
         Rect r{(W - lw) / 2, H - t.dp(84), lw, t.dp(44)};
         ui::Context::Press pr = ui_.press("attention", r);

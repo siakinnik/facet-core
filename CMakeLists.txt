@@ -35,6 +35,7 @@ add_executable(facet
     src/gpu/gl_package.cpp
     src/gpu/sha256.cpp
     src/platform/backlight.cpp
+    src/platform/console_log.cpp
     src/platform/evdev_touch.cpp
     src/platform/fbdev.cpp
     src/platform/gpu.cpp

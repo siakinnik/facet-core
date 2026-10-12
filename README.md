@@ -133,6 +133,7 @@ environment covers hardware specifics; with the service, edit
 | `FACET_SCALE` | UI scale (default `min(width, height) / 480`) |
 | `FACET_FB`, `FACET_TTY` | framebuffer (`/dev/fb0`) and console for graphics mode (`/dev/tty0`) |
 | `FACET_BACKEND` | `fbdev` (device), `x11` (dev window) or `headless` (tests) |
+| `FACET_CONSOLE_LOG` | `keep`: do not limit the kernel's messages on the console (by default Facet lowers `kernel.printk` to 3 while it runs on a device, and puts it back when it ends) |
 | `FACET_DATA` | data directory (default `/var/lib/facet`, else `~/.local/share/facet`) |
 | `FACET_PLUGIN_PATH` | extra plugin directories, `:` separated |
 | `FACET_FONT_DIR` | extra font directory |

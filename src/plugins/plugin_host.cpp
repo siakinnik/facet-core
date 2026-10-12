@@ -39,6 +39,12 @@ constexpr size_t kMaxOutbox = 1 << 20;
 constexpr int kMaxBadLines = 10;
 constexpr int kMaxCrashes = 5;
 constexpr double kCrashWindow = 600;
+// The supervision loop wakes at least every kPingInterval; when it did not
+// for this long the whole system was stalled (a flooding USB controller, a
+// firmware crash, a suspend): the modules' silence is not their fault.
+constexpr double kStallGap = kPingInterval + 3;
+// Pauses before a module that gave up is tried again.
+constexpr double kRetryAfter[] = {120, 600, 1800, 3600};
 constexpr double kFreezeAfter = 10;     // seconds hidden before a plugin without "background" is paused
 constexpr double kRevokeGrace = 5;      // seconds to release a withdrawn transient permission
 constexpr double kNotificationWake = 10;  // screen on after an important notification
@@ -783,7 +789,11 @@ void PluginHost::crash(Plugin& p, i18n::Text reason, double now) {
         f.gave_up = true;
         p.error = f;
         p.state = State::Failed;
-        log::error("plugins: %s failed permanently: %s", p.m.id.c_str(), describe(f).c_str());
+        size_t step = std::min<size_t>(size_t(p.give_ups), std::size(kRetryAfter) - 1);
+        p.retry_at = now + kRetryAfter[step];
+        ++p.give_ups;
+        log::error("plugins: %s failed: %s; trying again in %.0f s", p.m.id.c_str(), describe(f).c_str(),
+                   kRetryAfter[step]);
         return;
     }
     p.error = f;
@@ -1064,6 +1074,15 @@ void PluginHost::add_poll_fds(std::vector<pollfd>& fds) const {
 }
 
 void PluginHost::process(double now) {
+    if (last_process_ > 0 && now - last_process_ > kStallGap) {
+        log::warn("plugins: the system stalled for %.0f s; the modules are not blamed for it", now - last_process_);
+        for (auto& ptr : plugins_)
+            if (ptr->state == State::Running && !ptr->frozen) {
+                ptr->last_pong = now;  // their answers wait in the pipes, behind the stall
+                ptr->next_ping = now;
+            }
+    }
+    last_process_ = now;
     for (auto& ptr : plugins_) {
         Plugin& p = *ptr;
         if (p.pid > 0) receive_fds(p);  // before the messages that name the descriptors
@@ -1114,8 +1133,18 @@ void PluginHost::process(double now) {
             case State::Backoff:
                 if (now >= p.restart_at) spawn(p, now);
                 break;
+            case State::Failed:
+                if (p.retry_at > 0 && now >= p.retry_at && is_enabled(p.m.id) && p.block == Block::None) {
+                    p.retry_at = 0;
+                    p.crashes.clear();
+                    log::info("plugins: %s: trying again after a failure", p.m.id.c_str());
+                    spawn(p, now);
+                }
+                break;
             default: break;
         }
+        // Stable for a whole crash window: the next failure starts the pauses over.
+        if (p.state == State::Running && p.give_ups > 0 && now - p.started_at > kCrashWindow) p.give_ups = 0;
         if (p.pid > 0) {
             flush(p);
             if (p.wbuf.size() > kMaxOutbox && !p.frozen) crash(p, "not reading messages", now);
@@ -1147,6 +1176,9 @@ double PluginHost::next_deadline(double now) const {
                 for (const auto& [perm, at] : p->revoke_deadline) t = std::min(t, at);
                 break;
             case State::Backoff: t = std::min(t, p->restart_at); break;
+            case State::Failed:
+                if (p->retry_at > 0) t = std::min(t, p->retry_at);
+                break;
             default: break;
         }
     }
@@ -1194,10 +1226,32 @@ void PluginHost::set_enabled(const std::string& id, bool enabled, double now) {
 void PluginHost::restart(const std::string& id, double now) {
     Plugin* p = find(id);
     if (!p || !is_enabled(id) || p->block != Block::None) return;
+    revive_providers(*p, now);
     kill_now(*p);
     p->crashes.clear();
+    p->retry_at = 0;
     p->error = {};
     spawn(*p, now);
+}
+
+const Plugin* PluginHost::stopped_provider(const Plugin& consumer) const {
+    for (const auto& need : consumer.m.needs) {
+        const Plugin* prov = provider_for(consumer, need);
+        if (prov && (prov->state == State::Failed || prov->state == State::Backoff)) return prov;
+    }
+    return nullptr;
+}
+
+void PluginHost::revive_providers(const Plugin& consumer, double now) {
+    for (const auto& need : consumer.m.needs) {
+        Plugin* prov = provider_for(consumer, need);
+        if (!prov || prov->state != State::Failed || prov->block != Block::None) continue;
+        log::info("plugins: %s: starting %s again, it is needed", consumer.m.id.c_str(), prov->m.id.c_str());
+        prov->crashes.clear();
+        prov->retry_at = 0;
+        prov->error = {};
+        spawn(*prov, now);
+    }
 }
 
 void PluginHost::set_visible(const std::string& id, bool visible) {
@@ -1205,6 +1259,7 @@ void PluginHost::set_visible(const std::string& id, bool visible) {
     if (!p || p->visible == visible) return;
     p->visible = visible;
     p->hidden_since = mono_now();
+    if (visible) revive_providers(*p, mono_now());
     if (p->state != State::Running) return;
     if (visible && p->frozen) freeze(*p, false, mono_now());
     Json msg = Json::object();

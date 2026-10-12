@@ -127,6 +127,10 @@ struct Plugin {
     double started_at = 0, last_pong = 0, next_ping = 0, deadline = 0, restart_at = 0;
     int ping_seq = 0;
     std::vector<double> crashes;
+    // After giving up (State::Failed) it is tried again later, less often each
+    // time (0 = never); give_ups counts them until it has run stable for a while.
+    double retry_at = 0;
+    int give_ups = 0;
 
     // State published by the plugin.
     Json ui;
@@ -210,6 +214,9 @@ public:
 
     void set_enabled(const std::string& id, bool enabled, double now);
     bool is_enabled(const std::string& id) const;
+    // A module `consumer` needs that has failed or waits to be restarted (its
+    // apps are left without it), nullptr if all it needs runs or starts.
+    const Plugin* stopped_provider(const Plugin& consumer) const;
 
     // ---- Permissions (Settings > Apps). Stored in the config as
     // permissions.<id>.<permission> = "allow" | "ask" | "deny". A plugin starts
@@ -328,6 +335,9 @@ private:
     void kill_now(Plugin& p);
     void on_exit(Plugin& p, int status, double now);
     void crash(Plugin& p, i18n::Text reason, double now);
+    // Starts again the modules `consumer` needs that gave up (a failed
+    // compositor leaves its apps without a screen, with nothing to tell why).
+    void revive_providers(const Plugin& consumer, double now);
     void close_fds(Plugin& p);
     void receive_fds(Plugin& p);  // accepts and reads the plugin's fd socket
     static void close_gpu(SurfaceBuffer& s);
@@ -344,6 +354,7 @@ private:
     std::deque<PermissionPrompt> prompts_;
     NotificationCenter notifications_;
     double wake_until_ = 0;
+    double last_process_ = 0;  // when process() last ran: a gap means the system stalled
     std::vector<WaylandClient> wayland_clients_;
     bool gpu_layers_ = false, surface_frames_ = false, gpu_buffers_ = false;
     std::string gpu_node_;

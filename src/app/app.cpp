@@ -17,6 +17,7 @@
 #include <map>
 
 #include "core/log.h"
+#include "platform/console_log.h"
 #include "core/timezone.h"
 #include "i18n/i18n.h"
 
@@ -218,6 +219,11 @@ bool App::init() {
     boot_thread_ = std::thread(wait_for_system, std::ref(system_ready_), std::ref(stop_));
     log::info("facet: %s backend, %dx%d, data in %s", platform_->name(), canvas_.width(), canvas_.height(),
               paths::data_root().c_str());
+    // On a device the console is under Facet's picture, and a flood of driver
+    // errors printed there stalls everything; FACET_CONSOLE_LOG=keep leaves it.
+    const char* keep = std::getenv("FACET_CONSOLE_LOG");
+    bool real_display = std::strcmp(platform_->name(), "headless") != 0 && std::strcmp(platform_->name(), "x11") != 0;
+    if (real_display && !(keep && std::strcmp(keep, "keep") == 0)) console_log_.quiet();
     return true;
 }
 
@@ -301,6 +307,7 @@ int App::run() {
     host_.shutdown_all();
     config_.save_if_dirty(now_s(), true);
     platform_->set_display_power(true);
+    console_log_.restore();
     return 0;
 }
 

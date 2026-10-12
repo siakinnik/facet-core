@@ -13,6 +13,7 @@
 #include "gpu/gl_package.h"
 #include "gfx/canvas.h"
 #include "gfx/recorder.h"
+#include "platform/console_log.h"
 #include "platform/platform.h"
 #include "plugins/plugin_host.h"
 #include "ui/context.h"
@@ -111,6 +112,7 @@ private:
                              bool fullscreen);
 
     std::unique_ptr<platform::Platform> platform_;
+    platform::ConsoleLog console_log_;  // quiet while a real display runs
     gfx::Canvas canvas_;
     ui::Fonts fonts_;
     ui::Theme theme_;

@@ -155,6 +155,7 @@ const i18n::Table& ru() {
         {"could not prepare its container", "не удалось подготовить контейнер"},
         {"could not start its container (details in the log)", "не удалось запустить контейнер (подробности в журнале)"},
         {"Modules need attention: {}", "Модулям нужно внимание: {}"},
+        {"Waiting for {}", "Ожидает: {}"},
         {"Modules", "Модули"},
         {"Apps", "Приложения"},
         {"Installed modules", "Установленные модули"},

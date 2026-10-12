@@ -212,9 +212,24 @@ HeaderHit Context::begin_screen(std::string_view id, std::string_view title, boo
     float bottom = docked ? std::min(H, overlay_.y) : H;
     viewport_ = {0, hh, W, std::max(0.f, bottom - hh)};
     Scroll& s = scroll_[screen_];
-    float max_scroll = std::max(0.f, s.content_h - viewport_.h);
+    step_scroll(s, viewport_);
+    if (s.offset > 0.5f) canvas_->fill_rect({0, hh - 1, W, std::max(1.f, t.dp(1))}, c.divider);
+
+    col_w_ = std::min(W - 2 * gut, t.dp(Theme::kMaxContent));
+    col_x_ = std::floor((W - col_w_) / 2);
+    content_top_ = viewport_.y + t.dp(4) - s.offset;
+    cursor_ = content_top_;
+    in_group_ = false;
+    group_index_ = 0;
+    canvas_->push_clip(viewport_);
+    return hit;
+}
+
+void Context::step_scroll(Scroll& s, const Rect& viewport) {
+    const Theme& t = *theme_;
+    float max_scroll = std::max(0.f, s.content_h - viewport.h);
     if (!blocked_) {
-        if (p_.pressed && viewport_.contains(p_.x, p_.y)) {
+        if (p_.pressed && viewport.contains(p_.x, p_.y)) {
             s.tracking = true;
             s.start_offset = s.offset;
             s.velocity = 0;
@@ -246,16 +261,88 @@ HeaderHit Context::begin_screen(std::string_view id, std::string_view title, boo
         s.offset = clamped;
         if (!s.tracking) s.velocity = 0;
     }
-    if (s.offset > 0.5f) canvas_->fill_rect({0, hh - 1, W, std::max(1.f, t.dp(1))}, c.divider);
+}
 
-    col_w_ = std::min(W - 2 * gut, t.dp(Theme::kMaxContent));
-    col_x_ = std::floor((W - col_w_) / 2);
-    content_top_ = viewport_.y + t.dp(4) - s.offset;
-    cursor_ = content_top_;
-    in_group_ = false;
-    group_index_ = 0;
-    canvas_->push_clip(viewport_);
-    return hit;
+float Context::begin_pages(std::string_view id, const Rect& viewport, int pages) {
+    const Theme& t = *theme_;
+    screen_ = fnv1a(id);  // widgets inside are scoped to this area
+    pager_ = screen_;
+    Pager& g = pagers_[pager_];
+    float w = std::max(1.f, viewport.w);
+    g.pages = std::max(1, pages);
+    g.page = std::clamp(g.page, 0, g.pages - 1);
+    if (std::fabs(g.width - w) > 0.5f) {  // another screen size: keep the page
+        g.width = w;
+        g.offset = float(g.page) * w;
+    }
+    float max_off = float(g.pages - 1) * w;
+    if (!blocked_) {
+        if (p_.pressed && viewport.contains(p_.x, p_.y)) {
+            g.tracking = true;
+            g.horizontal = false;
+            g.start_offset = g.offset;
+            g.velocity = 0;
+            g.last_move = now_;
+        }
+        if (g.tracking && (p_.down || p_.released) && drag_) {
+            float dx = p_.x - press_x_, dy = p_.y - press_y_;
+            if (!g.horizontal && std::fabs(dx) > std::fabs(dy)) g.horizontal = true;  // decided once per touch
+            if (g.horizontal) {
+                float target = g.start_offset - dx;
+                if (target < 0) target *= 0.35f;  // gives a little at the ends
+                if (target > max_off) target = max_off + (target - max_off) * 0.35f;
+                float v = float((target - g.offset) / dt_);
+                g.velocity = g.velocity * 0.4f + v * 0.6f;
+                g.last_move = now_;
+                g.offset = target;
+            }
+        }
+        if (p_.released && g.tracking) {
+            g.tracking = false;
+            if (g.horizontal) {
+                float vel = now_ - g.last_move > 0.1 ? 0.f : g.velocity;  // px/s, > 0: towards the next page
+                int target = int(std::lround((g.offset + vel * 0.25f) / w));
+                if (target == g.page) {  // a decided swipe moves at least one page
+                    float moved = g.offset - float(g.page) * w;
+                    if (vel > t.dp(500) || moved > w * 0.12f) target = g.page + 1;
+                    else if (vel < -t.dp(500) || moved < -w * 0.12f) target = g.page - 1;
+                }
+                g.page = std::clamp(target, 0, g.pages - 1);
+            }
+        }
+    }
+    if (!g.tracking) {
+        float target = float(g.page) * w;
+        float diff = target - g.offset;
+        if (std::fabs(diff) > 0.5f) {
+            g.offset += diff * float(1.0 - std::exp(-dt_ * 14.0));
+            redraw_ = true;
+        } else {
+            g.offset = target;
+        }
+    }
+    canvas_->push_clip(viewport);
+    return g.offset;
+}
+
+void Context::end_pages(float dots_y) {
+    if (!pager_) return;
+    const Theme& t = *theme_;
+    Pager& g = pagers_[pager_];
+    canvas_->pop_clip();
+    if (g.pages > 1) {
+        float step = t.dp(18), r = t.dp(4);
+        float x0 = float(canvas_->width()) / 2 - step * float(g.pages - 1) / 2;
+        int shown = std::clamp(int(std::lround(g.offset / g.width)), 0, g.pages - 1);
+        for (int i = 0; i < g.pages; ++i) {
+            float cx = x0 + step * float(i);
+            Press pr = interact(make_id("page" + std::to_string(i)), {cx - step / 2, dots_y - t.dp(18), step, t.dp(36)});
+            if (pr.clicked) g.page = i;
+            Color c = i == shown ? t.c.accent : t.c.text_dim.alpha(0.45f);
+            canvas_->fill_circle(cx, dots_y, i == shown ? r * 1.3f : r, c);
+        }
+    }
+    pager_ = 0;
 }
 
 void Context::end_screen() {
@@ -638,28 +725,35 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     const Palette& c = t.c;
     Press pr = interact(make_id(id), r);
     canvas_->fill_round_rect(r, t.dp(Theme::kRadius + 6), pr.held ? c.surface_pressed : c.surface);
-    float pad = t.dp(22);
+    // Low tiles (many modules on a small screen) lay out sideways: the icon
+    // at the left, the title and the subtitle next to it.
+    const bool compact = r.h < t.dp(140);
+    float pad = compact ? t.dp(16) : t.dp(22);
     Color ic = tone == Tone::Normal ? c.accent : tone_color(tone);
-    float cr = t.dp(30);
-    canvas_->fill_circle(r.x + pad + cr, r.y + pad + cr, cr, ic.alpha(0.16f));
-    float is = t.dp(32);
-    Rect ib{r.x + pad + cr - is / 2, r.y + pad + cr - is / 2, is, is};
+    float cr = compact ? t.dp(24) : t.dp(30);
+    float cy = compact ? r.cy() : r.y + pad + cr;
+    canvas_->fill_circle(r.x + pad + cr, cy, cr, ic.alpha(0.16f));
+    float is = compact ? t.dp(26) : t.dp(32);
+    Rect ib{r.x + pad + cr - is / 2, cy - is / 2, is, is};
     if (icon_ops && icon_ops->is_array()) draw_ops(*this, std::string(id) + "\x1ficon", *icon_ops, ib, 32.f / 24.f);
     else draw_icon(*canvas_, icon, ib, ic);
     if (!badge.empty()) {
         float bh = t.dp(26), bw = std::max(bh, text_width(FontRole::Medium, Theme::kSmall, badge) + t.dp(16));
-        Rect b{r.x + pad + 2 * cr - bw * 0.55f, r.y + pad - t.dp(4), bw, bh};
+        Rect b{r.x + pad + 2 * cr - bw * 0.55f, cy - cr - t.dp(4), bw, bh};
         canvas_->fill_round_rect(b.inset(-t.dp(2)), bh / 2 + t.dp(2), c.surface);  // gap to the icon
         canvas_->fill_round_rect(b, bh / 2, c.bad);
         text(FontRole::Medium, Theme::kSmall, b, badge, Color{255, 255, 255, 255}, Align::Center);
     }
 
-    float inner = r.w - 2 * pad;
     float sub_h = subtitle.empty() ? 0 : t.dp(24);
-    Rect title_box{r.x + pad, r.bottom() - pad - sub_h - t.dp(34), inner, t.dp(34)};
+    float tx = compact ? r.x + pad + 2 * cr + t.dp(14) : r.x + pad;
+    float inner = compact ? r.right() - pad - tx : r.w - 2 * pad;
+    float block_h = t.dp(34) + sub_h;
+    float ty = compact ? r.cy() - block_h / 2 : r.bottom() - pad - block_h;
+    Rect title_box{tx, ty, inner, t.dp(34)};
     text(FontRole::Medium, 23, title_box, ellipsize(FontRole::Medium, 23, title, inner), c.text);
     if (!subtitle.empty())
-        text(FontRole::Regular, Theme::kSmall, {r.x + pad, r.bottom() - pad - sub_h, inner, sub_h},
+        text(FontRole::Regular, Theme::kSmall, {tx, ty + t.dp(34), inner, sub_h},
              ellipsize(FontRole::Regular, Theme::kSmall, subtitle, inner), tone == Tone::Normal ? c.text_dim : ic);
     return pr.clicked;
 }

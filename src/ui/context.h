@@ -105,6 +105,15 @@ public:
     void begin_overlay() { in_overlay_ = true; }
     void end_overlay() { in_overlay_ = false; }
 
+    // ---- Pages for free layouts (the menu): `pages` screens side by side,
+    // switched by swiping sideways (a flick or half a swipe turns the page,
+    // it settles by itself, and gives a little at the ends). begin_pages()
+    // returns the offset in pixels to subtract from the x of everything drawn
+    // inside (page n starts at n * viewport.w); end_pages() draws the dots
+    // centred on `dots_y`, which can be tapped too.
+    float begin_pages(std::string_view id, const gfx::Rect& viewport, int pages);
+    void end_pages(float dots_y);
+
     // ---- Free-layout building blocks (menus, dashboards).
     // badge: small count/text on the icon ("" = none); icon_ops: custom icon
     // drawn with canvas ops on a 24 x 24 grid instead of `icon`.
@@ -147,6 +156,9 @@ private:
         bool tracking = false, fresh = true;
     };
 
+    // Follows the finger and the fling of one scrollable area.
+    void step_scroll(Scroll& s, const gfx::Rect& viewport);
+
     uint64_t make_id(std::string_view s) const;
     Press interact(uint64_t id, const gfx::Rect& r);
     int repeat_steps(uint64_t id, const gfx::Rect& r);  // tap = 1, hold = auto-repeat
@@ -180,6 +192,14 @@ private:
     uint64_t group_key_ = 0;
 
     std::unordered_map<uint64_t, Scroll> scroll_;
+    struct Pager {
+        int page = 0, pages = 1;
+        float offset = 0, start_offset = 0, velocity = 0, width = 0;
+        double last_move = 0;
+        bool tracking = false, horizontal = false;
+    };
+    std::unordered_map<uint64_t, Pager> pagers_;
+    uint64_t pager_ = 0;  // the one being drawn (begin_pages), 0 = none
     std::unordered_map<uint64_t, float> group_h_;
     Popup popup_;
 
