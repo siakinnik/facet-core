@@ -308,6 +308,30 @@ void App::draw_menu() {
     }
 }
 
+// The mouse pointer: drawn last, over everything on the canvas.
+void App::draw_cursor() {
+    const Theme& t = theme_;
+    float x = mouse_.x(), y = mouse_.y();
+    float s = std::max(1.f, t.dp(1));
+    // An arrow: tip at (x, y), 12 x 19 dp.
+    const gfx::Point body[] = {{0, 0},   {0, 17 * s}, {4.2f * s, 13.3f * s}, {7 * s, 19 * s},
+                               {9.4f * s, 17.9f * s}, {6.7f * s, 12.4f * s}, {12 * s, 12.2f * s}};
+    gfx::Point f[7];
+    for (int i = 0; i < 7; ++i) f[i] = {x + body[i].x, y + body[i].y};
+    // A dark outline: the same shape pushed out a little in four directions.
+    for (int dx = -1; dx <= 1; dx += 2)
+        for (int dy = -1; dy <= 1; dy += 2) {
+            gfx::Path p;
+            gfx::Point q[7];
+            for (int i = 0; i < 7; ++i) q[i] = {f[i].x + float(dx) * 1.3f * s, f[i].y + float(dy) * 1.3f * s};
+            p.polygon(q, 7);
+            canvas_.fill_path(p, gfx::Color{0, 0, 0, 200});
+        }
+    gfx::Path fill;
+    fill.polygon(f, 7);
+    canvas_.fill_path(fill, gfx::Color{255, 255, 255, 255});
+}
+
 // ------------------------------------------------------------------ dashboard
 
 void App::draw_dashboard() {
@@ -370,6 +394,19 @@ void App::draw_settings(double) {
 
     // Keyboard: built-in or any installed keyboard plugin.
     ui_.section(tr("Input"));
+    if (real_display_) {
+        // A mouse (or a remote with a pointer) next to the touchscreen.
+        if (mouse_.available() || mouse_.enabled()) {
+            bool on = mouse_.enabled();
+            if (ui_.toggle("mouse", tr("Mouse"), on)) {
+                config_.set("mouse", on);
+                mouse_.set_enabled(on);
+                cursor_ = false;
+            }
+        } else {
+            ui_.info(tr("Mouse"), tr("not connected"), ui::Tone::Dim);
+        }
+    }
     {
         std::vector<std::string> ids = {"builtin"}, names = {tr("Built-in")};
         for (const auto& p : host_.plugins())
@@ -420,6 +457,14 @@ void App::draw_settings(double) {
     }
     if (ip_cache_.empty()) ip_cache_ = local_ips();
     ui_.info(tr("IP address"), ip_cache_);
+
+    ui_.section(tr("Power"));
+    if (ui_.button("power_facet", tr("Restart Facet"))) power_dialog_ = PowerDialog::Facet;
+    if (real_display_) {
+        if (ui_.button("power_reboot", tr("Reboot the device"))) power_dialog_ = PowerDialog::Reboot;
+        if (ui_.button("power_off", tr("Shut down the device"), ui::ButtonStyle::Danger))
+            power_dialog_ = PowerDialog::Off;
+    }
 
     ui_.section(tr("System"));
     ui_.info(tr("Display"), std::string(platform_->name()) + " · " + std::to_string(canvas_.width()) + "×" +

@@ -61,7 +61,8 @@ gfx::Rect App::banner_rect() const {
 }
 
 bool App::modal_active(double t) {
-    return host_.pending_prompt() || host_.notifications().ringing(t) || gfx_dialog_ != GfxDialog::None;
+    return host_.pending_prompt() || host_.notifications().ringing(t) || gfx_dialog_ != GfxDialog::None ||
+           power_dialog_ != PowerDialog::None;
 }
 
 // Called before the screen is drawn: what part of the screen belongs to overlays.
@@ -92,6 +93,8 @@ void App::draw_overlays(double t) {
         draw_call(*call, t);
     } else if (gfx_dialog_ != GfxDialog::None) {
         draw_gfx_dialog();
+    } else if (power_dialog_ != PowerDialog::None) {
+        draw_power_dialog();
     } else if (banner_ && !kb_.visible) {
         draw_banner(t);
     }
@@ -243,6 +246,42 @@ void App::draw_gfx_dialog() {
         if (c == "now") request_restart();
         else restart_needed_ = true;
     }
+}
+
+void App::draw_power_dialog() {
+    using PD = PowerDialog;
+    if (power_dialog_ == PD::Going) {
+        draw_dialog("powergoing", tr("Please wait"), tr("The device is going down…"), {});
+        return;
+    }
+    std::string title, text, yes;
+    if (power_dialog_ == PD::Facet) {
+        title = tr("Restart Facet?");
+        text = tr("Only Facet restarts, in a few seconds; the system and what else runs on it stay.");
+        yes = tr("Restart Facet");
+    } else if (power_dialog_ == PD::Reboot) {
+        title = tr("Reboot the device?");
+        text = tr("The whole system restarts. It takes a minute.");
+        yes = tr("Reboot");
+    } else if (power_dialog_ == PD::Off) {
+        title = tr("Shut the device down?");
+        text = tr("The whole system stops. It has to be switched on by hand afterwards.");
+        yes = tr("Shut down");
+    } else {
+        title = tr("Not allowed");
+        text = tr("Facet has to run as the system's administrator (root) to do this.");
+    }
+    std::vector<std::pair<std::string, std::string>> buttons;
+    if (power_dialog_ != PD::NotRoot) buttons.push_back({"yes", yes});
+    buttons.push_back({"no", power_dialog_ == PD::NotRoot ? tr("Close") : tr("Cancel")});
+    std::string c = draw_dialog("power", title, text, buttons);
+    if (c.empty()) return;
+    dirty_ = true;
+    PD chosen = power_dialog_;
+    power_dialog_ = PD::None;
+    if (c != "yes") return;
+    if (chosen == PD::Facet) request_restart();
+    else power_now(chosen == PD::Reboot);
 }
 
 // Transient permissions in use: a small icon in the top right corner of

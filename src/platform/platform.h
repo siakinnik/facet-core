@@ -12,12 +12,14 @@
 
 namespace facet::platform {
 
-enum class EventType { Down, Up, Move, Resize, Quit };
+enum class EventType { Down, Up, Move, Resize, Quit, Wheel };
 
 struct Event {
     EventType type;
     float x = 0, y = 0;
     int w = 0, h = 0;
+    float dy = 0;        // Wheel: notches, > 0 scrolls the content up (reading on)
+    bool mouse = false;  // from a mouse, not a finger (shows the pointer)
 };
 
 // A plugin surface the GPU composes under the canvas (where the canvas is

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(facet VERSION 0.7.5 LANGUAGES CXX)
+project(facet VERSION 0.7.6 LANGUAGES CXX)
 set(FACET_VERSION_SUFFIX "alpha")  # pre-release tag; empty for final releases
 
 set(CMAKE_CXX_STANDARD 20)
@@ -36,6 +36,7 @@ add_executable(facet
     src/gpu/sha256.cpp
     src/platform/backlight.cpp
     src/platform/console_log.cpp
+    src/platform/evdev_mouse.cpp
     src/platform/evdev_touch.cpp
     src/platform/fbdev.cpp
     src/platform/gpu.cpp

@@ -3,7 +3,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <poll.h>
+#include <linux/reboot.h>
 #include <signal.h>
+#include <sys/reboot.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -222,8 +224,8 @@ bool App::init() {
     // On a device the console is under Facet's picture, and a flood of driver
     // errors printed there stalls everything; FACET_CONSOLE_LOG=keep leaves it.
     const char* keep = std::getenv("FACET_CONSOLE_LOG");
-    bool real_display = std::strcmp(platform_->name(), "headless") != 0 && std::strcmp(platform_->name(), "x11") != 0;
-    if (real_display && !(keep && std::strcmp(keep, "keep") == 0)) console_log_.quiet();
+    real_display_ = std::strcmp(platform_->name(), "headless") != 0 && std::strcmp(platform_->name(), "x11") != 0;
+    if (real_display_ && !(keep && std::strcmp(keep, "keep") == 0)) console_log_.quiet();
     return true;
 }
 
@@ -233,6 +235,8 @@ int App::run() {
     if (!init()) return 1;
     std::vector<pollfd> fds;
     std::vector<platform::Event> events;
+    const bool want_mouse = real_display_ && config_.get_bool("mouse", false);
+    mouse_.set_enabled(want_mouse);
 
     while (!g_quit) {
         double t = now_s();
@@ -252,6 +256,7 @@ int App::run() {
 
         fds.clear();
         platform_->add_poll_fds(fds);
+        mouse_.add_poll_fds(fds);
         host_.add_poll_fds(fds);
         if (::poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR) {
             log::error("poll: %s", std::strerror(errno));
@@ -261,6 +266,7 @@ int App::run() {
         t = now_s();
         events.clear();
         platform_->pump(events);
+        if (real_display_) mouse_.pump(events, t, canvas_.width(), canvas_.height());
         host_.process(t);
         if (host_.take_changed()) dirty_ = true;
         bool surface_frames = host_.take_surface_frames();
@@ -308,12 +314,44 @@ int App::run() {
     config_.save_if_dirty(now_s(), true);
     platform_->set_display_power(true);
     console_log_.restore();
+    if (power_exit_ != 0) {  // no init system to ask: what the reboot command itself does
+        ::sync();
+        if (::reboot(power_exit_) != 0) log::error("facet: reboot: %s", std::strerror(errno));
+    }
     return 0;
+}
+
+// A whole-system restart or power-off. Under systemd it asks the manager, so
+// that every service stops in order (databases, containers); without an init
+// system Facet stops its modules, syncs and calls reboot() itself.
+void App::power_now(bool reboot) {
+    if (::geteuid() != 0) {
+        power_dialog_ = PowerDialog::NotRoot;
+        dirty_ = true;
+        return;
+    }
+    struct stat st;
+    if (::stat("/run/systemd/system", &st) == 0) {
+        pid_t pid = ::fork();
+        if (pid == 0) {
+            ::execlp("systemctl", "systemctl", "--no-block", reboot ? "reboot" : "poweroff", (char*)nullptr);
+            _exit(127);
+        }
+        if (pid > 0) {
+            log::info("facet: %s through systemd", reboot ? "rebooting" : "shutting down");
+            power_dialog_ = PowerDialog::Going;  // until the manager stops Facet
+            dirty_ = true;
+            return;
+        }
+    }
+    log::info("facet: %s", reboot ? "rebooting" : "shutting down");
+    power_exit_ = reboot ? LINUX_REBOOT_CMD_RESTART : LINUX_REBOOT_CMD_POWER_OFF;
+    g_quit = 1;
 }
 
 // The service manager starts Facet again (Restart=always).
 void App::request_restart() {
-    log::info("facet: restarting to apply the graphics settings");
+    log::info("facet: restarting (asked for in the interface)");
     g_quit = 1;
 }
 
@@ -407,6 +445,7 @@ void App::run_frame(double t) {
     }
     draw_keyboard();
     draw_overlays(t);
+    if (cursor_ && mouse_.enabled()) draw_cursor();
     ui_.end_frame();
     // Keys of the built-in keyboard reach the field on the next frame.
     for (auto& [action, text] : kb_pending_) apply_key(action, text);
@@ -429,9 +468,23 @@ void App::handle_events(const std::vector<platform::Event>& events, double t) {
                 }
                 dirty_ = true;
                 break;
+            case EventType::Wheel:
+                last_input_ = t;
+                if (display_on_ && !swallow_) {
+                    ui_.add_wheel(e.dy);
+                    pointer_.x = e.x;
+                    pointer_.y = e.y;
+                    dirty_ = true;
+                }
+                break;
             case EventType::Down:
             case EventType::Up:
             case EventType::Move: {
+                if (e.mouse != cursor_ && (e.mouse || e.type == EventType::Down)) {
+                    cursor_ = e.mouse;  // the last one to touch decides
+                    dirty_ = true;
+                }
+                if (e.mouse && e.type == EventType::Move) dirty_ = true;
                 if (debug_input_ && e.type != EventType::Move)
                     log::info("input: %s %.0f,%.0f", e.type == EventType::Down ? "down" : "up", e.x, e.y);
                 last_input_ = t;

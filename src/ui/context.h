@@ -40,6 +40,9 @@ public:
     };
 
     void begin_frame(gfx::Canvas& canvas, const Theme& theme, const Pointer& pointer, double now);
+    // A mouse wheel turned by `notches` (> 0: reading on) over (x, y); the
+    // scrolling area under the pointer takes it in the next frame.
+    void add_wheel(float notches) { wheel_ += notches; }
     void end_frame();
     // True when the UI needs another frame (animation, fling, layout settle).
     bool wants_redraw() const { return redraw_; }
@@ -200,6 +203,7 @@ private:
     };
     std::unordered_map<uint64_t, Pager> pagers_;
     uint64_t pager_ = 0;  // the one being drawn (begin_pages), 0 = none
+    float wheel_ = 0;
     std::unordered_map<uint64_t, float> group_h_;
     Popup popup_;
 

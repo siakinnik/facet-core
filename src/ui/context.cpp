@@ -228,6 +228,11 @@ HeaderHit Context::begin_screen(std::string_view id, std::string_view title, boo
 void Context::step_scroll(Scroll& s, const Rect& viewport) {
     const Theme& t = *theme_;
     float max_scroll = std::max(0.f, s.content_h - viewport.h);
+    if (wheel_ != 0 && !blocked_ && viewport.contains(p_.x, p_.y)) {
+        s.offset += wheel_ * t.dp(72);
+        s.velocity = 0;
+        wheel_ = 0;
+    }
     if (!blocked_) {
         if (p_.pressed && viewport.contains(p_.x, p_.y)) {
             s.tracking = true;
@@ -276,6 +281,10 @@ float Context::begin_pages(std::string_view id, const Rect& viewport, int pages)
         g.offset = float(g.page) * w;
     }
     float max_off = float(g.pages - 1) * w;
+    if (wheel_ != 0 && !blocked_ && viewport.contains(p_.x, p_.y)) {  // a notch turns a page
+        g.page = std::clamp(g.page + (wheel_ > 0 ? 1 : -1), 0, g.pages - 1);
+        wheel_ = 0;
+    }
     if (!blocked_) {
         if (p_.pressed && viewport.contains(p_.x, p_.y)) {
             g.tracking = true;

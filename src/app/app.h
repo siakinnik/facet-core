@@ -14,6 +14,7 @@
 #include "gfx/canvas.h"
 #include "gfx/recorder.h"
 #include "platform/console_log.h"
+#include "platform/evdev_mouse.h"
 #include "platform/platform.h"
 #include "plugins/plugin_host.h"
 #include "ui/context.h"
@@ -62,6 +63,18 @@ private:
     std::string draw_dialog(const std::string& key, const std::string& title, const std::string& text,
                             const std::vector<std::pair<std::string, std::string>>& buttons);
     void request_restart();
+    // Power: restart only Facet, or reboot / shut down the whole device (a
+    // dialog asks first). Offered where there is a real display.
+    enum class PowerDialog { None, Facet, Reboot, Off, NotRoot, Going };
+    PowerDialog power_dialog_ = PowerDialog::None;
+    void draw_power_dialog();
+    void power_now(bool reboot);
+    int power_exit_ = 0;  // LINUX_REBOOT_CMD_* to call when the loop has ended (no init system)
+    // A mouse beside the touchscreen (Settings > Input).
+    platform::EvdevMouse mouse_;
+    bool real_display_ = false;  // fbdev or gpu: a device, not a window
+    bool cursor_ = false;        // the pointer is drawn (a mouse moved last)
+    void draw_cursor();
     std::vector<gpu::GpuInfo> gpus_;
     std::unique_ptr<gpu::GlPackage> gl_;
     bool restart_needed_ = false;
