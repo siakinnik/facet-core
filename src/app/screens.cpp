@@ -82,6 +82,7 @@ Status module_status(const plugins::Plugin& p, bool enabled) {
     using plugins::Block;
     using plugins::State;
     if (!enabled) return {tr("Off"), ui::Tone::Dim};
+    if (p.m.data_only() && p.block == Block::None) return {tr("Theme"), ui::Tone::Dim};
     switch (p.block) {
         case Block::Incompatible: return {tr("Incompatible, update needed"), ui::Tone::Bad};
         case Block::NeedsReview: return {tr("Needs permission"), ui::Tone::Warn};
@@ -365,9 +366,29 @@ void App::draw_settings(double) {
     if (ui_.begin_screen("settings", tr("Settings")) == ui::HeaderHit::Back) navigate(View::Menu);
 
     ui_.section(tr("Appearance"));
-    int theme = config_.get_int("theme", 0);
-    if (ui_.select("theme", tr("Theme"), {tr("Dark"), tr("Light"), tr("Auto (day/night)")}, theme))
-        config_.set("theme", theme);
+    {
+        // The built-in themes, then the packs modules bring.
+        std::vector<std::string> names = {tr("Dark"), tr("Light"), tr("Auto (day/night)")};
+        auto packs = host_.themes();
+        for (const auto& th : packs) names.push_back(th.name.get(catalog().language()));
+        int sel = config_.get_int("theme", 0);
+        std::string pack = config_.get_str("theme_pack", "");
+        for (size_t i = 0; i < packs.size(); ++i)
+            if (packs[i].module + "/" + packs[i].id == pack) sel = 3 + int(i);
+        if (ui_.select("theme", tr("Theme"), names, sel)) {
+            if (sel < 3) {
+                config_.set("theme", sel);
+                config_.set("theme_pack", "");
+            } else {
+                config_.set("theme_pack", packs[size_t(sel - 3)].module + "/" + packs[size_t(sel - 3)].id);
+            }
+        }
+        if (skin_ && skin_->animated) {
+            int anim = config_.get_int("theme_anim", 0);
+            if (ui_.select("theme_anim", tr("Theme animation"), {tr("Automatic"), tr("On"), tr("Off")}, anim))
+                config_.set("theme_anim", anim);
+        }
+    }
     if (platform_->has_brightness()) {
         int b = config_.get_int("brightness", 100);
         if (ui_.stepper("brightness", tr("Brightness"), b, 10, 100, 10, "%")) {
@@ -899,6 +920,7 @@ void App::draw_fullscreen_surface(const plugins::SurfaceRef& s, const std::strin
     const plugins::SurfaceBuffer* sb = s.buffer;
     const std::string& owner = s.owner->m.id;
     surface_owners_.push_back(owner);
+    fullscreen_shown_ = true;
     const Theme& t = theme_;
     float W = float(canvas_.width()), H = float(canvas_.height());
     // The keyboard covers the bottom: the owner may move its content above it.

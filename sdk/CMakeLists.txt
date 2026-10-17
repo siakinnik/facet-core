@@ -20,6 +20,7 @@ if(NOT TARGET facet_sdk)
         src/keyboard.cpp
         src/json.cpp
         src/plugin.cpp
+        src/theme.cpp
     )
     target_include_directories(facet_sdk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_include_directories(facet_sdk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

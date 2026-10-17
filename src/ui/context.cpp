@@ -1,6 +1,7 @@
 #include "ui/context.h"
 
 #include "ui/canvas_ops.h"
+#include "ui/skin.h"
 
 #include <cmath>
 #include <cstdio>
@@ -35,6 +36,7 @@ void Context::begin_frame(gfx::Canvas& canvas, const Theme& theme, const Pointer
     dt_ = std::clamp(now - now_, 0.001, 1.0 / 30);
     now_ = now;
     redraw_ = false;
+    animated_ = false;
     blocked_ = popup_.open;
     screen_ = 0;
 
@@ -376,7 +378,11 @@ void Context::open_group(std::string_view title) {
     }
     group_key_ = screen_ * 31 + uint64_t(group_index_);
     float h = group_h_[group_key_];
-    if (h > 0) canvas_->fill_round_rect({col_x_, cursor_, col_w_, h}, t.dp(Theme::kRadius), t.c.surface);
+    group_box_ = {col_x_, cursor_, col_w_, h};
+    if (h > 0) {
+        if (skin_ && skin_->card.has_under) draw_skin_ops(skin_->card.under, group_box_, 40);
+        else canvas_->fill_round_rect(group_box_, card_radius(), t.c.surface);
+    }
     group_start_ = cursor_;
     group_rows_ = 0;
     in_group_ = true;
@@ -391,6 +397,7 @@ void Context::close_group() {
         cached = h;
         redraw_ = true;
     }
+    if (skin_ && skin_->card.has_over && h > 0) draw_skin_ops(skin_->card.over, {col_x_, group_start_, col_w_, h}, 40);
     cursor_ += theme_->dp(Theme::kGap) * 1.5f;
 }
 
@@ -408,7 +415,22 @@ Rect Context::row(float height_dp) {
 }
 
 void Context::row_highlight(const Rect& r, bool held) {
-    if (held) canvas_->fill_round_rect(r.inset(theme_->dp(4)), theme_->dp(Theme::kRadius - 4), theme_->c.surface_pressed);
+    if (held)
+        canvas_->fill_round_rect(r.inset(theme_->dp(4)), std::max(0.f, card_radius() - theme_->dp(4)),
+                                 theme_->c.surface_pressed);
+}
+
+float Context::card_radius() const {
+    return theme_->dp(skin_ && skin_->radius > 0 ? skin_->radius : Theme::kRadius);
+}
+
+void Context::draw_skin_ops(const Json& ops, const Rect& r, float reach_dp,
+                            const std::unordered_map<std::string, gfx::Color>* names) {
+    OpsEnv env;
+    env.clip = reach_dp > 0 ? r.inset(-theme_->dp(reach_dp)) : r;
+    env.names = names;
+    env.touch = false;
+    draw_ops(*this, "skin", ops, r, env);
 }
 
 // ------------------------------------------------------------------ widgets
@@ -733,7 +755,11 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     const Theme& t = *theme_;
     const Palette& c = t.c;
     Press pr = interact(make_id(id), r);
-    canvas_->fill_round_rect(r, t.dp(Theme::kRadius + 6), pr.held ? c.surface_pressed : c.surface);
+    Color tile_tone = tone == Tone::Normal ? c.accent : tone_color(tone);
+    std::unordered_map<std::string, Color> skin_names;
+    if (skin_) skin_names = {{"card", pr.held ? c.surface_pressed : c.surface}, {"tone", tile_tone}};
+    if (skin_ && skin_->tile.has_under) draw_skin_ops(skin_->tile.under, r, 48, &skin_names);
+    else canvas_->fill_round_rect(r, card_radius() + t.dp(6), pr.held ? c.surface_pressed : c.surface);
     // Low tiles (many modules on a small screen) lay out sideways: the icon
     // at the left, the title and the subtitle next to it. Upright takes
     // 22 + 60 (icon) + 8 + 34 (title) + 24 (subtitle) + 22 = 170: below that
@@ -767,6 +793,7 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     if (!subtitle.empty())
         text(FontRole::Regular, Theme::kSmall, {tx, ty + t.dp(34), inner, sub_h},
              ellipsize(FontRole::Regular, Theme::kSmall, subtitle, inner), tone == Tone::Normal ? c.text_dim : ic);
+    if (skin_ && skin_->tile.has_over) draw_skin_ops(skin_->tile.over, r, 48, &skin_names);
     return pr.clicked;
 }
 

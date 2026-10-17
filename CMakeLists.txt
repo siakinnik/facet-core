@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(facet VERSION 0.7.6 LANGUAGES CXX)
+project(facet VERSION 0.8.0 LANGUAGES CXX)
 set(FACET_VERSION_SUFFIX "alpha")  # pre-release tag; empty for final releases
 
 set(CMAKE_CXX_STANDARD 20)
@@ -37,6 +37,7 @@ add_executable(facet
     src/platform/backlight.cpp
     src/platform/console_log.cpp
     src/platform/evdev_mouse.cpp
+    src/ui/skin.cpp
     src/platform/evdev_touch.cpp
     src/platform/fbdev.cpp
     src/platform/gpu.cpp
@@ -115,6 +116,7 @@ add_subdirectory(plugins/keyboard)
 if(FACET_BUILD_EXAMPLES)
     add_subdirectory(examples/pinpad)
     add_subdirectory(examples/showcase)
+    add_subdirectory(examples/theme-demo)
 endif()
 
 install(TARGETS facet RUNTIME DESTINATION bin)

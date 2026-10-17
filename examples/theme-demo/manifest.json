@@ -1,0 +1,9 @@
+{
+  "id": "example-theme",
+  "name": { "en": "Aurora theme (demo)", "ru": "Тема «Северное сияние» (демо)" },
+  "version": "0.0.1",
+  "api": 3,
+  "themes": [
+    { "id": "aurora", "name": { "en": "Aurora", "ru": "Северное сияние" }, "file": "aurora.json" }
+  ]
+}

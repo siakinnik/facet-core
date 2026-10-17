@@ -18,6 +18,7 @@
 #include "platform/platform.h"
 #include "plugins/plugin_host.h"
 #include "ui/context.h"
+#include "ui/skin.h"
 
 namespace facet {
 
@@ -133,6 +134,16 @@ private:
     Config config_;
     plugins::PluginHost host_{config_};
     net::Monitor net_;
+
+    // A theme pack in use (Settings > Theme), nothing for the built-in themes.
+    std::shared_ptr<ui::Skin> skin_;
+    std::string skin_key_;        // "module/theme" it was loaded for
+    bool skin_changed_ = false;   // the theme has to be applied again
+    bool anim_on_ = false;        // moving parts of drawings move
+    double frame_t_ = 0;          // when the last frame was drawn
+    bool fullscreen_shown_ = false;  // a surface covers the screen this frame
+    void draw_skin_screen(bool over);
+    static const char* view_name(View v);
 
     View view_ = View::Splash;
     std::string plugin_id_;

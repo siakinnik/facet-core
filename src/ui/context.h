@@ -20,6 +20,8 @@
 
 namespace facet::ui {
 
+class Skin;
+
 enum class Tone { Normal, Dim, Good, Warn, Bad };
 enum class ButtonStyle { Normal, Primary, Danger };
 enum class HeaderHit { None, Back, Action };
@@ -40,6 +42,23 @@ public:
     };
 
     void begin_frame(gfx::Canvas& canvas, const Theme& theme, const Pointer& pointer, double now);
+
+    // ---- A theme pack (ui/skin.h): its drawings on tiles, cards and screens.
+    void set_skin(const Skin* s) { skin_ = s; }
+    const Skin* skin() const { return skin_; }
+    // Moving parts of drawings (waves) move; off, they stand at their start.
+    void set_animations(bool on) { animations_ = on; }
+    bool animations() const { return animations_; }
+    double time() const { return animations_ ? now_ : 0.0; }
+    // A drawing of this frame has a moving part: the frame has to come again.
+    void mark_animated() { animated_ = true; }
+    bool animated() const { return animated_; }
+    // Corner radius of cards and tiles (the pack's or the default), px.
+    float card_radius() const;
+    // Draws a theme's `ops` for the box `r`; they may reach `reach_dp` past it.
+    // `names`: colour names for them besides the tokens.
+    void draw_skin_ops(const Json& ops, const gfx::Rect& r, float reach_dp = 0,
+                       const std::unordered_map<std::string, gfx::Color>* names = nullptr);
     // A mouse wheel turned by `notches` (> 0: reading on) over (x, y); the
     // scrolling area under the pointer takes it in the next frame.
     void add_wheel(float notches) { wheel_ += notches; }
@@ -204,6 +223,9 @@ private:
     std::unordered_map<uint64_t, Pager> pagers_;
     uint64_t pager_ = 0;  // the one being drawn (begin_pages), 0 = none
     float wheel_ = 0;
+    const Skin* skin_ = nullptr;
+    bool animations_ = true, animated_ = false;
+    gfx::Rect group_box_;  // the card of the list group being drawn, for its "over" drawing
     std::unordered_map<uint64_t, float> group_h_;
     Popup popup_;
 

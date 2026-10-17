@@ -47,6 +47,12 @@ struct PermissionRequest {
     LocalizedString reason;  // why the plugin needs it (shown to the user), may be empty
 };
 
+// A theme a module ships as a data file (sdk/include/facet/theme.h).
+struct ThemeEntry {
+    std::string id, file;  // file: a name inside the module's directory
+    LocalizedString name;
+};
+
 struct Manifest {
     std::string id, version, exec, dir;
     std::string sdk;  // SDK the plugin was built with, "" if unknown
@@ -58,6 +64,9 @@ struct Manifest {
     std::string tile_icon;
     bool has_tile = false;      // a tile on the home screen
     bool has_settings = false;  // a page under Settings > Modules
+    std::vector<ThemeEntry> themes;
+    // Only data (themes): no program to run.
+    bool data_only() const { return exec.empty() && !themes.empty(); }
     bool compatible() const;
     bool provides_cap(const std::string& name) const;
 };
@@ -214,6 +223,12 @@ public:
 
     void set_enabled(const std::string& id, bool enabled, double now);
     bool is_enabled(const std::string& id) const;
+    // The themes of the enabled modules, for Settings > Theme.
+    struct ThemeInfo {
+        std::string module, id, path;
+        LocalizedString name;
+    };
+    std::vector<ThemeInfo> themes() const;
     // A module `consumer` needs that has failed or waits to be restarted (its
     // apps are left without it), nullptr if all it needs runs or starts.
     const Plugin* stopped_provider(const Plugin& consumer) const;

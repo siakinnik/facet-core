@@ -120,6 +120,11 @@ The first directory containing a given plugin id wins.
   provider then shares a directory with each module that requires it (§3.9).
   Keyboards provide `input.keyboard@1`; the core accepts keyboard messages
   only from such plugins.
+- `themes` (optional) lists theme packs the module brings (§5.1):
+  `[{ "id": "halloween", "name": { "en": "Halloween" }, "file": "halloween.json" }]`.
+  `file` is a plain file name inside the module's directory. A module with
+  `themes` and no `exec` is only data: nothing is started for it, it is listed
+  in Settings > Apps as a theme, and it can be switched off like any module.
 - `tile.icon` is one of the built-in icons: `clock`, `display`, `camera`,
   `settings`, `warning`, `plugin`, `back`, `chevron`, `shift`, `backspace`,
   `enter`, `gauge`, `chat`, `bell`, `mic`, `phone`, `close`. Unknown names show
@@ -420,6 +425,17 @@ use dp relative to its top-left corner and are clipped to it.
 | `polyline` | `pts`, `width`, `color` |
 | `text` | `x`, `y`, `w`, `h`, `text`, `size`, `color`, `align` (`start`/`center`/`end`), `font` (`regular`/`medium`/`light`) |
 | `icon` | `x`, `y`, `size`, `name`, `color` |
+| `ellipse` | `cx`, `cy`, `rx`, `ry`, `color` |
+| `grad` | `x`, `y`, `w`, `h`, `r`, `from`, `to`, `dir` (`v` down, `h` right): a rounded rectangle blending from one colour to the other |
+| `glow` | `cx`, `cy`, `r`, `color`: a soft light, brightest at the centre, nothing at `r` |
+| `rglow` | `x`, `y`, `w`, `h`, `r`, `spread`, `color`: a soft light around a rounded rectangle, strongest at its edge |
+
+Every op may have `alpha` (0..1). Every number of an op may be an expression
+object instead of dp: `{"w": a, "h": b, "k": c}` is `a` × the canvas' (or box's)
+width + `b` × its height + `c` dp, and `"wave"` (`sin`, `tri`, `saw`, `pulse`,
+`flicker`) with `min`, `max`, `period` (s) and `phase` (0..1) makes it move
+with time. A canvas with a moving part is redrawn 15 times a second while it
+is on screen (not at all when the user switched animation off).
 
 Colours are theme tokens (`bg`, `surface`, `surface_pressed`, `text`,
 `text_dim`, `accent`, `on_accent`, `divider`, `track`, `good`, `warn`, `bad`),
@@ -490,6 +506,44 @@ ui.end_screen();
 Sizes are in dp: `theme.dp(x) = x * scale`, `scale = min(w, h) / 480`.
 Colours come only from `Theme::Palette` (dark and light). Widgets take no
 colours or sizes, so the design cannot drift.
+
+### 5.1 Theme packs
+
+A module can bring themes (`themes` in its manifest, §3.2); the user picks one
+in Settings > Theme (stored as `theme_pack` = `"<module>/<theme id>"`; a pack
+whose module is gone or disabled falls back to the built-in dark theme). A
+theme is a JSON file (format 1) that C++ modules write with `facet/theme.h`
+(`facet::sdk::ThemeDef`; `examples/theme-demo` is a template, the Halloween
+theme `facet-theme-halloween` a complete one):
+
+```json
+{
+  "format": 1, "id": "aurora", "base": "dark", "radius": 20, "animated": true,
+  "palette": { "bg": "#050B14", "accent": "#4FE3C1", "northern": "#3CF0B0" },
+  "screens": { "*": { "under": [ops], "over": [ops] }, "menu": { "over": [ops] } },
+  "tile": { "under": [ops], "over": [ops] },
+  "card": { "under": [ops], "over": [ops] }
+}
+```
+
+- `base` is the palette to start from (`dark` or `light`); `palette` replaces
+  its tokens (§3.8 canvas) and may add names of its own for the drawings.
+- `screens` holds drawings per screen (`*` is every screen; `menu`,
+  `dashboard`, `settings`, `graphics`, `plugin`, `apps`, `appinfo`,
+  `notifications`): `under` is drawn before the screen's widgets, `over` after
+  them (not over a full-screen surface). `tile` is for each tile of the menu,
+  `card` for each card of the lists: `under` replaces the plain rounded
+  rectangle, `over` is drawn after the content. Drawings use the canvas ops of
+  §3.8 with the box the drawing is for (the screen, the tile, the card) as the
+  reference of the width/height expressions; they may reach past a tile or
+  card, take no touches, and in a tile or card the colour names `card` (its
+  colour, lighter while pressed) and `tone` (its accent) are defined.
+- Drawn by the core, never executed: a theme is data. Limits: 256 KB, 600 ops
+  per place, 6000 in all; dialogs, the keyboard and permission prompts are
+  drawn over everything, so a theme cannot cover them.
+- Moving parts (waves) redraw the screen 15 times a second. `animated`
+  tells the core a theme has some, so that Settings offers Automatic / On /
+  Off (automatic: on only when the graphics card draws the interface).
 
 ## 6. Localisation
 

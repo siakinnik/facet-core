@@ -139,15 +139,65 @@ bool App::load_fonts() {
     return false;
 }
 
+const char* App::view_name(View v) {
+    switch (v) {
+        case View::Splash: return "splash";
+        case View::Menu: return "menu";
+        case View::Dashboard: return "dashboard";
+        case View::Settings: return "settings";
+        case View::Graphics: return "graphics";
+        case View::Plugin: return "plugin";
+        case View::Apps: return "apps";
+        case View::AppInfo: return "appinfo";
+        case View::Notifications: return "notifications";
+    }
+    return "";
+}
+
+// The drawings a theme pack puts under or over the screen being shown.
+void App::draw_skin_screen(bool over) {
+    if (!skin_ || view_ == View::Splash) return;
+    gfx::Rect box{0, 0, float(canvas_.width()), float(canvas_.height())};
+    auto draw = [&](const ui::Skin::Hook& h) {
+        if (over ? h.has_over : h.has_under) ui_.draw_skin_ops(over ? h.over : h.under, box);
+    };
+    draw(skin_->everywhere);
+    if (const ui::Skin::Hook* h = skin_->screen(view_name(view_))) draw(*h);
+}
+
 void App::update_theme(bool force) {
     int mode = config_.get_int("theme", 0);  // 0 dark, 1 light, 2 auto
     std::tm tm = local_now();
     night_ = tm.tm_hour < kDayStartHour || tm.tm_hour >= kNightStartHour;
-    bool dark = mode == 0 || (mode == 2 && night_);
+    // A theme pack, if one is chosen and still there; else the built-in themes.
+    std::string want = config_.get_str("theme_pack", "");
+    if (want != skin_key_ || (force && !want.empty() && !skin_)) {
+        skin_.reset();
+        skin_key_ = want;
+        skin_changed_ = true;
+        if (!want.empty()) {
+            for (const auto& th : host_.themes()) {
+                if (th.module + "/" + th.id != want) continue;
+                std::string err;
+                skin_ = ui::Skin::load(th.path, err);
+                if (!skin_) log::warn("theme: %s: %s", th.path.c_str(), err.c_str());
+                break;
+            }
+        }
+    }
+    int anim = config_.get_int("theme_anim", 0);  // 0 auto, 1 on, 2 off
+    bool anim_on = anim == 1 || (anim == 0 && ops_);
+    if (anim_on != anim_on_) {
+        anim_on_ = anim_on;
+        dirty_ = true;
+    }
+    bool dark = skin_ ? skin_->dark : (mode == 0 || (mode == 2 && night_));
     float scale = std::clamp(float(std::min(canvas_.width(), canvas_.height())) / 480.f, 0.75f, 4.f);
     if (const char* s = std::getenv("FACET_SCALE")) scale = float(std::atof(s));
-    if (force || dark != theme_.dark || scale != theme_.scale) {
+    if (force || skin_changed_ || dark != theme_.dark || scale != theme_.scale) {
+        skin_changed_ = false;
         theme_ = ui::Theme::make(dark, scale, &fonts_);
+        if (skin_) skin_->apply(theme_.c);
         host_.set_theme(dark ? "dark" : "light");
         host_.set_content_width(int(ui::Context::content_width_dp(theme_, float(canvas_.width()))));
         host_.set_screen_size(canvas_.width(), canvas_.height());
@@ -216,6 +266,8 @@ bool App::init() {
     present_frame(true);
 
     host_.scan();
+    skin_key_ = "?";  // the modules are known now: load the chosen theme pack again
+    update_theme(true);
     host_.start_enabled(t);
     boot_stage_ = 1;
     boot_thread_ = std::thread(wait_for_system, std::ref(system_ready_), std::ref(stop_));
@@ -248,6 +300,9 @@ int App::run() {
         // (waking marks the frame dirty anyway), otherwise poll() would spin.
         bool animating = display_on_ && (ui_.wants_redraw() || view_ == View::Splash);
         if (animating) next = std::min(next, t + 1.0 / 60);
+        // A theme's moving parts: a frame 15 times a second while one is on screen.
+        const bool moving = display_on_ && ui_.animated();
+        if (moving) next = std::min(next, std::max(t, frame_t_ + 1.0 / 15));
         if (gl_ && gl_->busy()) next = std::min(next, t + 0.5);  // download progress
         // While the GPU still reads the last canvas, drawing waits (its
         // message wakes the loop).
@@ -277,7 +332,8 @@ int App::run() {
         handle_events(events, t);
         tick(t);
         double t0 = debug_frames_ ? now_s() : 0;
-        if ((dirty_ || ui_.wants_redraw()) && display_on_ && platform_->ready_to_draw()) run_frame(t);
+        const bool anim_due = moving && t - frame_t_ >= 1.0 / 15 - 0.002;
+        if ((dirty_ || ui_.wants_redraw() || anim_due) && display_on_ && platform_->ready_to_draw()) run_frame(t);
         double t1 = debug_frames_ ? now_s() : 0;
         if (drew_ && display_on_) present_frame(true);
         if (debug_frames_ && drew_) {
@@ -432,6 +488,11 @@ void App::run_frame(double t) {
     ui_.set_overlay(kb_rect_);  // keyboard area of the previous frame
     prepare_overlays(t);        // dialogs, calls and banners take precedence
     surface_owners_.clear();
+    fullscreen_shown_ = false;
+    frame_t_ = t;
+    ui_.set_skin(skin_.get());
+    ui_.set_animations(anim_on_);
+    draw_skin_screen(false);
     switch (view_) {
         case View::Splash: draw_splash(); break;
         case View::Menu: draw_menu(); break;
@@ -443,6 +504,7 @@ void App::run_frame(double t) {
         case View::AppInfo: draw_app_info(t); break;
         case View::Notifications: draw_notifications(t); break;
     }
+    if (!fullscreen_shown_) draw_skin_screen(true);
     draw_keyboard();
     draw_overlays(t);
     if (cursor_ && mouse_.enabled()) draw_cursor();

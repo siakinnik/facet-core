@@ -226,6 +226,13 @@ text is the lookup key. Translations live only in `i18n/` directories:
 and add it to `languages()`. Plugins get the language through the protocol
 and switch at runtime.
 
+### Themes and the SDK
+
+Modules can bring themes (backgrounds, glows, redrawn tiles and cards, moving
+decorations). A theme is a data file written with `sdk/include/facet/theme.h`;
+see `docs/ARCHITECTURE.md` §5.1 and `examples/theme-demo`. The Halloween theme
+is a separate module, `facet-theme-halloween`.
+
 ### Layout
 
 ```

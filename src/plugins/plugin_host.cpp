@@ -134,6 +134,20 @@ bool load_manifest(const std::string& dir, Manifest& m) {
         m.tile_title = j["tile"]["title"].is_null() ? m.name : LocalizedString::from(j["tile"]["title"], m.id);
         m.tile_icon = j["tile"]["icon"].as_string("plugin");
     }
+    for (const auto& th : j["themes"].items()) {
+        ThemeEntry e;
+        e.id = th["id"].str();
+        e.file = th["file"].str();
+        e.name = LocalizedString::from(th["name"], e.id);
+        // A plain file name inside the module's directory.
+        bool bad_file = e.file.empty() || e.file[0] == '.' || e.file.find('/') != std::string::npos ||
+                        e.file.find("..") != std::string::npos;
+        if (!valid_id(e.id) || bad_file) {
+            log::warn("plugins: %s: bad theme entry", m.id.c_str());
+            continue;
+        }
+        if (m.themes.size() < 16) m.themes.push_back(std::move(e));
+    }
     const Json& settings = j["settings"];
     if (settings.as_bool() || settings.is_object()) {
         m.has_settings = true;
@@ -143,8 +157,9 @@ bool load_manifest(const std::string& dir, Manifest& m) {
         log::warn("plugins: %s: invalid id", dir.c_str());
         return false;
     }
-    if (m.exec.empty() || m.exec[0] == '/' || m.exec.find("..") != std::string::npos ||
-        m.exec.find('/') != std::string::npos) {
+    if (m.exec.empty() ? m.themes.empty()
+                       : (m.exec[0] == '/' || m.exec.find("..") != std::string::npos ||
+                          m.exec.find('/') != std::string::npos)) {
         log::warn("plugins: %s: bad exec", m.id.c_str());
         return false;
     }
@@ -258,6 +273,14 @@ Plugin* PluginHost::find(const std::string& id) {
     for (auto& p : plugins_)
         if (p->m.id == id) return p.get();
     return nullptr;
+}
+
+std::vector<PluginHost::ThemeInfo> PluginHost::themes() const {
+    std::vector<ThemeInfo> out;
+    for (const auto& p : plugins_)
+        if (is_enabled(p->m.id) && p->m.compatible())
+            for (const auto& t : p->m.themes) out.push_back({p->m.id, t.id, p->m.dir + "/" + t.file, t.name});
+    return out;
 }
 
 bool PluginHost::is_enabled(const std::string& id) const {
@@ -439,6 +462,7 @@ void PluginHost::spawn(Plugin& p, double now) {
         changed_ = true;
         return;
     }
+    if (p.m.data_only()) return;  // themes: nothing to run
     std::string exe = p.m.dir + "/" + p.m.exec;
     if (::access(exe.c_str(), X_OK) != 0) {
         p.state = State::Failed;
