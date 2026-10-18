@@ -708,6 +708,15 @@ void App::draw_graphics() {
         if (mode == 1 && installed.empty() && gl_->available()) gl_->install();
         restart_needed_ = true;
     }
+    {
+        bool show = show_fps_;
+        if (ui_.toggle("showfps", tr("Frame counter"), show)) {
+            show_fps_ = show;
+            config_.set("show_fps", show);
+            dirty_ = true;
+        }
+        ui_.note(tr("Shows the frames drawn in the last second in the corner of the screen."));
+    }
     const std::string& failure = platform::gpu_failure();
     if (want_gpu && !layers_ && !failure.empty()) {
         ui_.info(tr("Graphics card unavailable"), failure, ui::Tone::Bad);

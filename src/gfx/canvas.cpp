@@ -96,14 +96,18 @@ void Canvas::blend_span(int x0, int x1, int y, Color c, float coverage) {
         std::fill(d + x0, d + x1, c.xrgb());
         return;
     }
+    // Red and blue are blended in one multiply, green in another; x/255 rounded is
+    // ((x + 128) + ((x + 128) >> 8)) >> 8 for x up to 255*255.
     unsigned ia = 255 - a;
-    unsigned sr = c.r * a + 127, sg = c.g * a + 127, sb = c.b * a + 127;
+    const uint32_t src_rb = ((uint32_t(c.r) << 16 | c.b) * a) + 0x00800080u;
+    const uint32_t src_g = uint32_t(c.g) * a + 0x80u;
     for (int x = x0; x < x1; ++x) {
         uint32_t v = d[x];
-        unsigned dr = (sr + ((v >> 16) & 0xFF) * ia) / 255;
-        unsigned dg = (sg + ((v >> 8) & 0xFF) * ia) / 255;
-        unsigned db = (sb + (v & 0xFF) * ia) / 255;
-        d[x] = 0xFF000000u | dr << 16 | dg << 8 | db;
+        uint32_t rb = src_rb + (v & 0x00FF00FFu) * ia;
+        rb = ((rb + ((rb >> 8) & 0x00FF00FFu)) >> 8) & 0x00FF00FFu;
+        uint32_t g = src_g + ((v >> 8) & 0xFFu) * ia;
+        g = ((g + (g >> 8)) >> 8) & 0xFFu;
+        d[x] = 0xFF000000u | rb | g << 8;
     }
 }
 
@@ -226,6 +230,58 @@ void Canvas::fill_round_rect(const Rect& r, float radius, Color c) {
     fill_rect({r.x, top, r.w, bottom - top}, c);
 }
 
+void Canvas::glow(const Rect& r, float radius, float spread, Color c) {
+    if (!rec_ || c.a == 0 || spread < 1.f) return;
+    if (r.inset(-spread).intersect(clip_).empty()) return;
+    rec_->clip(clip_);
+    rec_->glow(r, radius, spread, c);
+}
+
+bool Canvas::layer_begin(uint32_t id, uint64_t stamp, const Rect& r) {
+    if (!rec_) return true;
+    const bool have = rec_->layer_begin(id, stamp, r);
+    if (!have) {  // its commands start from the canvas' whole area
+        clip_stack_.push_back(clip_);
+        clip_ = {0, 0, float(w_), float(h_)};
+    }
+    return !have;
+}
+
+void Canvas::layer_end() {
+    if (!rec_) return;
+    rec_->layer_end();
+    if (!clip_stack_.empty()) {
+        clip_ = clip_stack_.back();
+        clip_stack_.pop_back();
+    }
+}
+
+void Canvas::gradient(const Rect& r, float radius, Color from, Color to, bool vertical) {
+    if (!rec_ || r.empty() || r.intersect(clip_).empty()) return;
+    rec_->clip(clip_);
+    rec_->gradient(r, std::clamp(radius, 0.f, std::min(r.w, r.h) * 0.5f), from, to, vertical);
+}
+
+void Canvas::fill_ellipse(const Rect& box, Color c) {
+    if (c.a == 0 || box.w < 0.2f || box.h < 0.2f) return;
+    if (rec_) {  // the GPU draws it: no mask to rasterize and keep
+        if (box.inset(-1).intersect(clip_).empty()) return;
+        rec_->clip(clip_);
+        rec_->ellipse(box, c);
+        return;
+    }
+    const float rx = box.w / 2, ry = box.h / 2, cx = box.cx(), cy = box.cy();
+    const int n = std::clamp(int(std::sqrt(std::max(rx, ry)) * 4.f), 12, 96);
+    Point pts[96];
+    for (int k = 0; k < n; ++k) {  // clockwise on the screen
+        float a = 6.2831853f * float(k) / float(n);
+        pts[k] = {cx + rx * std::cos(a), cy + ry * std::sin(a)};
+    }
+    Path p;
+    p.polygon(pts, n);
+    fill_path(p, c);
+}
+
 void Canvas::fill_circle(float cx, float cy, float radius, Color c) {
     if (rec_) return fill_round_rect({cx - radius, cy - radius, radius * 2, radius * 2}, radius, c);
     Path p;
@@ -252,14 +308,29 @@ float Canvas::draw_text(Font& font, int px, float x, float baseline, std::string
             pen += g.advance;
             continue;
         }
+        // Clip the glyph box once; the inner loop is then free of bounds checks.
+        const int xa = std::max(0, cx0 - gx), xb = std::min(g.w, cx1 - gx);
+        const uint32_t src_rb = uint32_t(c.r) << 16 | c.b, src_g = c.g;
         for (int y = 0; y < g.h; ++y) {
             int dy = gy + y;
             if (dy < cy0 || dy >= cy1) continue;
             const uint8_t* row = &g.alpha[size_t(y) * g.w];
-            for (int x = 0; x < g.w; ++x) {
-                int dx = gx + x;
-                if (dx < cx0 || dx >= cx1 || row[x] == 0) continue;
-                blend(dx, dy, c, row[x] / 255.f);
+            uint32_t* d = px_ + size_t(dy) * size_t(w_) + gx;
+            for (int x = xa; x < xb; ++x) {
+                unsigned cov = row[x];
+                if (cov == 0) continue;
+                unsigned a = c.a == 255 ? cov : (cov * c.a + 127) / 255;
+                if (a >= 255) {
+                    d[x] = c.xrgb();
+                    continue;
+                }
+                unsigned ia = 255 - a;
+                uint32_t v = d[x];
+                uint32_t rb = src_rb * a + 0x00800080u + (v & 0x00FF00FFu) * ia;
+                rb = ((rb + ((rb >> 8) & 0x00FF00FFu)) >> 8) & 0x00FF00FFu;
+                uint32_t gg = src_g * a + 0x80u + ((v >> 8) & 0xFFu) * ia;
+                gg = ((gg + (gg >> 8)) >> 8) & 0xFFu;
+                d[x] = 0xFF000000u | rb | gg << 8;
             }
         }
         pen += g.advance;

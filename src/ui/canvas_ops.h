@@ -2,6 +2,7 @@
 // colour tokens and touch targets (see sdk/include/facet/plugin.h, Canvas).
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -24,10 +25,18 @@ struct OpsEnv {
     float unit = 1.f;  // dp per op unit (e.g. 32 dp / 24 for a tile icon drawn on a 24 x 24 grid)
     // Where drawing may reach (a glow around a tile goes past the tile); empty: the box.
     gfx::Rect clip;
-    // Colour names besides the theme's tokens (a tile's "card" and "tone").
-    const std::unordered_map<std::string, gfx::Color>* names = nullptr;
+    // A tile's colours, for the names "card" and "tone" (a theme's drawings).
+    const gfx::Color* card = nullptr;
+    const gfx::Color* tone = nullptr;
     bool touch = true;  // false: `hit` is ignored (a theme's drawings take no touches)
+    bool skin = false;  // a theme's drawings: time moves in steps (Context::skin_time)
 };
+
+// A list of ops in a form that draws without parsing again (themes draw the same list every frame).
+struct CompiledOps;
+std::shared_ptr<CompiledOps> compile_ops(Context& ui, const Json& ops);
+std::string draw_compiled(Context& ui, std::string_view id, const CompiledOps& ops, const gfx::Rect& box,
+                          const OpsEnv& env);
 
 // Draws `ops` inside `box` (e.g. a keyboard overlay). Returns the tapped hit id.
 // A number in an op is dp (times `unit`), or an object: {"w": a, "h": b, "k": c}

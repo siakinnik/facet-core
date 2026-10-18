@@ -3,6 +3,7 @@
 #include "ui/canvas_ops.h"
 #include "ui/skin.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -424,13 +425,20 @@ float Context::card_radius() const {
     return theme_->dp(skin_ && skin_->radius > 0 ? skin_->radius : Theme::kRadius);
 }
 
-void Context::draw_skin_ops(const Json& ops, const Rect& r, float reach_dp,
-                            const std::unordered_map<std::string, gfx::Color>* names) {
+void Context::draw_skin_ops(const Json& ops, const Rect& r, float reach_dp, const gfx::Color* card,
+                            const gfx::Color* tone) {
     OpsEnv env;
     env.clip = reach_dp > 0 ? r.inset(-theme_->dp(reach_dp)) : r;
-    env.names = names;
+    env.card = card;
+    env.tone = tone;
     env.touch = false;
-    draw_ops(*this, "skin", ops, r, env);
+    env.skin = true;
+    count_skin_ops(ops.items().size());
+    const auto t0 = std::chrono::steady_clock::now();
+    std::shared_ptr<CompiledOps>& c = compiled_[&ops];
+    if (!c) c = compile_ops(*this, ops);
+    draw_compiled(*this, "skin", *c, r, env);
+    skin_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // ------------------------------------------------------------------ widgets
@@ -756,9 +764,8 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     const Palette& c = t.c;
     Press pr = interact(make_id(id), r);
     Color tile_tone = tone == Tone::Normal ? c.accent : tone_color(tone);
-    std::unordered_map<std::string, Color> skin_names;
-    if (skin_) skin_names = {{"card", pr.held ? c.surface_pressed : c.surface}, {"tone", tile_tone}};
-    if (skin_ && skin_->tile.has_under) draw_skin_ops(skin_->tile.under, r, 48, &skin_names);
+    const Color skin_card = pr.held ? c.surface_pressed : c.surface, skin_tone = tile_tone;
+    if (skin_ && skin_->tile.has_under) draw_skin_ops(skin_->tile.under, r, 48, &skin_card, &skin_tone);
     else canvas_->fill_round_rect(r, card_radius() + t.dp(6), pr.held ? c.surface_pressed : c.surface);
     // Low tiles (many modules on a small screen) lay out sideways: the icon
     // at the left, the title and the subtitle next to it. Upright takes
@@ -793,7 +800,7 @@ bool Context::tile(std::string_view id, const Rect& r, std::string_view title, s
     if (!subtitle.empty())
         text(FontRole::Regular, Theme::kSmall, {tx, ty + t.dp(34), inner, sub_h},
              ellipsize(FontRole::Regular, Theme::kSmall, subtitle, inner), tone == Tone::Normal ? c.text_dim : ic);
-    if (skin_ && skin_->tile.has_over) draw_skin_ops(skin_->tile.over, r, 48, &skin_names);
+    if (skin_ && skin_->tile.has_over) draw_skin_ops(skin_->tile.over, r, 48, &skin_card, &skin_tone);
     return pr.clicked;
 }
 

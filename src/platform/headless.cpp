@@ -71,6 +71,13 @@ public:
         has_frame_ = true;
     }
 
+    // FACET_RECORD: record drawing commands as for the GPU helper and drop them (to time the recording).
+    bool supports_ops() const override { return std::getenv("FACET_RECORD") != nullptr; }
+    void present_ops(const std::vector<uint8_t>& ops, const std::vector<Layer>& layers) override {
+        (void)ops;
+        (void)layers;
+    }
+
     void set_display_power(bool on) override { log::info("headless: display %s", on ? "on" : "off"); }
 
     ~HeadlessPlatform() override { flush_shot(); }

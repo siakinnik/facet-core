@@ -158,11 +158,38 @@ const char* App::view_name(View v) {
 void App::draw_skin_screen(bool over) {
     if (!skin_ || view_ == View::Splash) return;
     gfx::Rect box{0, 0, float(canvas_.width()), float(canvas_.height())};
-    auto draw = [&](const ui::Skin::Hook& h) {
-        if (over ? h.has_over : h.has_under) ui_.draw_skin_ops(over ? h.over : h.under, box);
+    const std::string view = view_name(view_);
+    // Each drawing is a kept layer for the GPU: while nothing it depends on has
+    // changed it is not drawn again, the helper lays its texture over the picture.
+    auto draw = [&](const ui::Skin::Hook& h, uint32_t slot) {
+        if (!(over ? h.has_over : h.has_under)) return;
+        const uint32_t id = 1 + slot * 2 + (over ? 1 : 0);
+        uint64_t stamp = 1469598103934665603ull;
+        auto mix = [&](const void* p, size_t n) {
+            for (size_t i = 0; i < n; ++i) stamp = (stamp ^ static_cast<const uint8_t*>(p)[i]) * 1099511628211ull;
+        };
+        const bool moves = layer_animated_.count(id) ? layer_animated_[id] : true;
+        const uint64_t step = moves ? uint64_t(std::floor(ui_.skin_time() * 15.0 + 0.5)) : 0;
+        const int size[2] = {canvas_.width(), canvas_.height()};
+        mix(&skin_serial_, sizeof skin_serial_);
+        mix(view.data(), view.size());
+        mix(size, sizeof size);
+        mix(&theme_.scale, sizeof theme_.scale);
+        mix(&theme_.c, sizeof theme_.c);
+        mix(&step, sizeof step);
+        if (!canvas_.layer_begin(id, stamp, box)) {  // kept already
+            if (moves) ui_.mark_animated();
+            return;
+        }
+        const uint64_t marks = ui_.anim_marks();
+        const double l0 = debug_frames_ ? now_s() : 0;
+        ui_.draw_skin_ops(over ? h.over : h.under, box);
+        canvas_.layer_end();
+        if (debug_frames_) stat_layers_ += now_s() - l0;
+        layer_animated_[id] = ui_.anim_marks() != marks;
     };
-    draw(skin_->everywhere);
-    if (const ui::Skin::Hook* h = skin_->screen(view_name(view_))) draw(*h);
+    draw(skin_->everywhere, 0);
+    if (const ui::Skin::Hook* h = skin_->screen(view)) draw(*h, 1);
 }
 
 void App::update_theme(bool force) {
@@ -180,6 +207,7 @@ void App::update_theme(bool force) {
                 if (th.module + "/" + th.id != want) continue;
                 std::string err;
                 skin_ = ui::Skin::load(th.path, err);
+                ++skin_serial_;
                 if (!skin_) log::warn("theme: %s: %s", th.path.c_str(), err.c_str());
                 break;
             }
@@ -212,8 +240,11 @@ bool App::init() {
 
     debug_input_ = std::getenv("FACET_DEBUG_INPUT") != nullptr;
     debug_frames_ = std::getenv("FACET_DEBUG_FRAMES") != nullptr;
+    bench_ = std::getenv("FACET_BENCH") != nullptr;
+    if (const char* hz = std::getenv("FACET_BENCH")) bench_hz_ = std::max(10.0, std::atof(hz) > 1 ? std::atof(hz) : 60.0);
     paths::mkdirs(paths::data_root());
     config_.load(paths::data_root() + "/config.json");
+    show_fps_ = config_.get_bool("show_fps", false);
 
     platform::Options popt;
     popt.gpu = config_.get_str("graphics", "cpu") == "gpu";
@@ -306,8 +337,12 @@ int App::run() {
         if (gl_ && gl_->busy()) next = std::min(next, t + 0.5);  // download progress
         // While the GPU still reads the last canvas, drawing waits (its
         // message wakes the loop).
-        bool redraw_now = dirty_ && display_on_ && platform_->ready_to_draw();
+        // FACET_BENCH=<hz>: a frame every 1/hz s (60 by default: what a screen shows), whatever changed.
+        const bool bench_wait = bench_ && t < bench_next_;
+        if (bench_ && !bench_wait) dirty_ = true;
+        bool redraw_now = dirty_ && display_on_ && platform_->ready_to_draw() && !bench_wait;
         int timeout = redraw_now ? 0 : std::max(0, int(std::ceil((next - t) * 1000)));
+        if (bench_wait) timeout = std::min(timeout, std::max(0, int(std::ceil((bench_next_ - t) * 1000))));
 
         fds.clear();
         platform_->add_poll_fds(fds);
@@ -333,7 +368,20 @@ int App::run() {
         tick(t);
         double t0 = debug_frames_ ? now_s() : 0;
         const bool anim_due = moving && t - frame_t_ >= 1.0 / 15 - 0.002;
-        if ((dirty_ || ui_.wants_redraw() || anim_due) && display_on_ && platform_->ready_to_draw()) run_frame(t);
+        if ((dirty_ || ui_.wants_redraw() || anim_due) && display_on_ && platform_->ready_to_draw() &&
+            !(bench_ && t < bench_next_)) {
+            if (bench_) {
+                // Late = a frame that did not follow the last one within 1.5 refresh periods.
+                if (bench_last_ > 0) {
+                    double gap = t - bench_last_;
+                    bench_max_ = std::max(bench_max_, gap);
+                    if (gap > 1.5 / bench_hz_) ++bench_late_;
+                }
+                bench_last_ = t;
+                bench_next_ = t + 1.0 / bench_hz_ - 0.002;
+            }
+            run_frame(t);
+        }
         double t1 = debug_frames_ ? now_s() : 0;
         if (drew_ && display_on_) present_frame(true);
         if (debug_frames_ && drew_) {
@@ -343,9 +391,23 @@ int App::run() {
         }
         if (debug_frames_ && t - stat_since_ >= 5) {
             if (stat_frames_ > 0)
-                log::info("frames: %.1f fps, drawing %.1f ms, presenting %.1f ms per frame",
+                log::info("frames: %.1f fps, drawing %.1f ms (a theme's %.1f, of it the backgrounds %.1f), presenting %.1f ms per frame%s",
                           stat_frames_ / (t - stat_since_), stat_draw_ * 1000 / stat_frames_,
-                          stat_present_ * 1000 / stat_frames_);
+                          ui_.take_skin_seconds() * 1000 / stat_frames_, stat_layers_ * 1000 / stat_frames_,
+                          stat_present_ * 1000 / stat_frames_,
+                          bench_ ? (" | late " + std::to_string(bench_late_) + ", longest gap " +
+                                    std::to_string(int(bench_max_ * 1000)) + " ms").c_str()
+                                 : "");
+            bench_late_ = 0;
+            stat_layers_ = 0;
+            if (ops_) {
+                size_t masks;
+                double px;
+                rec_.take_path_stats(masks, px);
+                log::info("theme ops per frame: %.0f", double(ui_.take_skin_ops()) / std::max(1, stat_frames_));
+                log::info("masks rasterized in 5 s: %zu, %.1f Mpx", masks, px / 1e6);
+            }
+            bench_max_ = 0;
             stat_frames_ = 0;
             stat_draw_ = stat_present_ = 0;
             stat_since_ = t;
@@ -476,7 +538,20 @@ void App::present_frame(bool canvas_changed) {
     platform_->present_layers(canvas_, canvas_changed, layers);
 }
 
+// Frames drawn in the last second and what recording the last one took (Settings > Graphics).
+void App::draw_fps_counter(double t) {
+    fps_times_.push_back(t);
+    while (!fps_times_.empty() && fps_times_.front() < t - 1.0) fps_times_.pop_front();
+    char text[48];
+    std::snprintf(text, sizeof text, "%zu fps  %.1f ms", fps_times_.size(), fps_draw_ms_);
+    const ui::Theme& th = theme_;
+    gfx::Rect r{th.dp(8), th.dp(6), th.dp(150), th.dp(20)};
+    canvas_.fill_round_rect(r, th.dp(6), gfx::Color{0, 0, 0, 170});
+    ui_.text(ui::FontRole::Medium, 13, r, text, gfx::Color{120, 255, 120, 255}, gfx::Align::Center);
+}
+
 void App::run_frame(double t) {
+    const double frame_start = now_s();
     dirty_ = false;  // navigation inside the frame sets it again
     layer_refs_.clear();
     cpu_surfaces_.clear();
@@ -508,7 +583,9 @@ void App::run_frame(double t) {
     draw_keyboard();
     draw_overlays(t);
     if (cursor_ && mouse_.enabled()) draw_cursor();
+    if (show_fps_) draw_fps_counter(t);
     ui_.end_frame();
+    fps_draw_ms_ = (now_s() - frame_start) * 1000;
     // Keys of the built-in keyboard reach the field on the next frame.
     for (auto& [action, text] : kb_pending_) apply_key(action, text);
     if (!kb_pending_.empty()) dirty_ = true;

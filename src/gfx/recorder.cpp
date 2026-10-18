@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 #include "gfx/font.h"
 
@@ -29,6 +31,7 @@ void Recorder::begin_frame(bool lost) {
         pages_.clear();
         entries_.clear();
         carry_.clear();
+        layers_.clear();
     } else if (!sent_) {
         // The last frame was replaced before it reached the helper: its
         // uploads come along, later frames use what they put in the atlas.
@@ -37,6 +40,7 @@ void Recorder::begin_frame(bool lost) {
         carry_.clear();
     }
     sent_ = false;
+    pending_layers_.clear();
     // A full atlas starts over between frames (never inside one: the
     // regions this frame uses must stay valid until it is drawn).
     if (pages_.size() >= size_t(ops::kMaxAtlasPages) - 2) reset_atlas();
@@ -70,6 +74,41 @@ void Recorder::clip(const Rect& r) {
     clip_sent_ = true;
     auto* o = static_cast<ops::Clip*>(add(ops::kClip, sizeof(ops::Clip), 0));
     o->x = r.x, o->y = r.y, o->w = r.w, o->h_ = r.h;
+}
+
+void Recorder::glow(const Rect& r, float radius, float spread, Color c) {
+    auto* o = static_cast<ops::Glow*>(add(ops::kGlow, sizeof(ops::Glow), 0));
+    o->x = r.x, o->y = r.y, o->w = r.w, o->h_ = r.h, o->radius = radius, o->spread = spread;
+    o->color = pack(c);
+}
+
+void Recorder::gradient(const Rect& r, float radius, Color from, Color to, bool vertical) {
+    auto* o = static_cast<ops::Gradient*>(add(ops::kGradient, sizeof(ops::Gradient), 0));
+    o->x = r.x, o->y = r.y, o->w = r.w, o->h_ = r.h, o->radius = radius;
+    o->from = pack(from), o->to = pack(to), o->vertical = vertical ? 1 : 0;
+}
+
+void Recorder::ellipse(const Rect& r, Color c) {
+    auto* o = static_cast<ops::Ellipse*>(add(ops::kEllipse, sizeof(ops::Ellipse), 0));
+    o->x = r.x, o->y = r.y, o->w = r.w, o->h_ = r.h;
+    o->color = pack(c);
+}
+
+bool Recorder::layer_begin(uint32_t id, uint64_t stamp, const Rect& r) {
+    auto it = layers_.find(id);
+    const bool have = it != layers_.end() && it->second == stamp;
+    auto* o = static_cast<ops::Layer*>(add(ops::kLayer, sizeof(ops::Layer), 0));
+    o->id = id, o->use = have ? 1 : 0;
+    o->stamp_lo = uint32_t(stamp), o->stamp_hi = uint32_t(stamp >> 32);
+    o->x = r.x, o->y = r.y, o->w = r.w, o->h_ = r.h;
+    clip_sent_ = false;  // the helper starts the layer with the whole canvas as clip
+    if (!have) pending_layers_.emplace_back(id, stamp);
+    return have;
+}
+
+void Recorder::layer_end() {
+    add(ops::kLayerEnd, sizeof(ops::Header), 0);
+    clip_sent_ = false;
 }
 
 void Recorder::rect(const Rect& r, float radius, Color c) {
@@ -133,6 +172,14 @@ void Recorder::glyph(Font& font, uint32_t codepoint, int px, int x, int y, Color
 }
 
 void Recorder::path(const Path& p, int ox, int oy, int w, int h, Color c) {
+    // A big shape is kept in tiles: one wider than an atlas page could not be kept at all.
+    constexpr int kTile = 1024;
+    if (w <= kTile && h <= kTile) return path_tile(p, ox, oy, w, h, c);
+    for (int y = 0; y < h; y += kTile)
+        for (int x = 0; x < w; x += kTile) path_tile(p, ox + x, oy + y, std::min(kTile, w - x), std::min(kTile, h - y), c);
+}
+
+void Recorder::path_tile(const Path& p, int ox, int oy, int w, int h, Color c) {
     // The same shape at the same sub-pixel offset rasterizes the same: the key
     // is its outline relative to the mask's corner.
     uint64_t key = 1469598103934665603ull;
@@ -149,6 +196,8 @@ void Recorder::path(const Path& p, int ox, int oy, int w, int h, Color c) {
     key |= kPathKey;
     auto it = entries_.find(key);
     if (it != entries_.end()) return mask(it->second, ox, oy, c);
+    ++path_masks_;
+    path_pixels_ += double(w) * double(h);
     raster_.reset(w, h);
     rasterize(p, raster_, -float(ox), -float(oy));
     scratch_.assign(size_t(w) * size_t(h), 0);

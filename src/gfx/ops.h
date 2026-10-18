@@ -23,6 +23,11 @@ enum Type : uint32_t {
     kAtlasReset,   // Header only: every atlas page is free again
     kSurface,      // Surface: a plugin surface (the frame's layer list), opaque
     kImage,        // Image: XRGB8888 pixels scaled into a rectangle (nearest)
+    kGlow,         // Glow: light falling off with the distance from a (rounded) rectangle
+    kLayer,        // Layer: what follows up to kLayerEnd is drawn into a kept texture (or the kept one is used)
+    kLayerEnd,     // Header only: the end of a Layer's drawing
+    kEllipse,      // Ellipse: an ellipse inside a box, anti-aliased
+    kGradient,     // Gradient: a (rounded) rectangle blending from one colour to another
 };
 
 constexpr int kAtlasSize = 2048;       // atlas pages are kAtlasSize x kAtlasSize alpha
@@ -43,6 +48,43 @@ struct Rect {
     Header h;
     float x, y, w, h_, radius;
     uint32_t color;
+};
+
+// Light around a rounded rectangle (a point when w and h are 0): `color` fully
+// inside it, then fading like (1 - distance / spread)^2.2 outwards.
+struct Glow {
+    Header h;
+    float x, y, w, h_, radius, spread;
+    uint32_t color;
+};
+
+// A part of the picture that rarely changes (a theme's background): drawn once
+// into a texture of the helper, which keeps it under `id` for as long as the
+// core sends the same `stamp`. `use` set: the helper has it already, nothing
+// follows and no kLayerEnd; else the commands up to kLayerEnd are drawn into
+// the texture first. Either way the texture is then laid over the canvas at
+// x, y, w, h with its transparency (the layer is not clipped by the commands'
+// own clip, which is reset on both sides of it).
+struct Layer {
+    Header h;
+    uint32_t id, use;
+    uint32_t stamp_lo, stamp_hi;
+    float x, y, w, h_;
+};
+
+// An ellipse filling the box x, y, w, h.
+struct Ellipse {
+    Header h;
+    float x, y, w, h_;
+    uint32_t color;
+};
+
+// A rounded rectangle blending from `from` (top or left) to `to` (bottom or right).
+struct Gradient {
+    Header h;
+    float x, y, w, h_, radius;
+    uint32_t from, to;
+    uint32_t vertical;
 };
 
 struct Mask {

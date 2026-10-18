@@ -9,6 +9,11 @@
 //   facet-gpu --fd N --offscreen WxH [--dump f]  without a screen (tests)
 //
 // The protocol is described in src/gpu/channel.h.
+#include <cmath>
+#include <cstddef>
+
+#include <deque>
+#include <ctime>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -28,6 +33,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "gfx/ops.h"
@@ -37,6 +43,10 @@ namespace ops = facet::gfx::ops;
 
 using facet::Json;
 using facet::gpu::Channel;
+
+#ifndef EGL_BUFFER_AGE_EXT
+#define EGL_BUFFER_AGE_EXT 0x313D
+#endif
 
 namespace {
 
@@ -102,6 +112,7 @@ attribute vec4 clip;
 attribute vec4 color;
 attribute vec2 param;
 uniform vec2 size;
+uniform vec2 origin;  // the canvas point at the target's top left (a kept layer starts elsewhere)
 varying vec2 v_uv;
 varying vec4 v_edge;
 varying vec4 v_clip;
@@ -113,7 +124,8 @@ void main() {
     v_clip = clip;
     v_color = color;
     v_param = param;
-    gl_Position = vec4(pos.x / size.x * 2.0 - 1.0, 1.0 - pos.y / size.y * 2.0, 0.0, 1.0);
+    vec2 p = pos - origin;
+    gl_Position = vec4(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0, 0.0, 1.0);
 }
 )";
 
@@ -134,7 +146,22 @@ float span(float lo, float hi) { return clamp(min(lo, 0.5) + min(hi, 0.5), 0.0, 
 void main() {
     float cov = span(v_clip.x, v_clip.z) * span(v_clip.y, v_clip.w);
     vec4 col = v_color;
-    if (v_param.y < 0.5) {
+    if (v_param.y > 4.5) {  // an ellipse inside the shape's box
+        vec2 p = vec2(v_edge.x - v_edge.z, v_edge.y - v_edge.w) * 0.5;
+        vec2 r = max(vec2(v_edge.x + v_edge.z, v_edge.y + v_edge.w) * 0.5, vec2(0.01));
+        float k0 = length(p / r);
+        float k1 = max(length(p / (r * r)), 0.000001);
+        cov *= clamp(0.5 - (k0 - 1.0) * k0 / k1, 0.0, 1.0);  // distance to the outline, about
+    } else if (v_param.y > 3.5) {  // a kept layer: its colours are premultiplied already
+        gl_FragColor = texture2D(tex, v_uv) * cov;
+        return;
+    }
+    else if (v_param.y > 2.5) {  // light around a shape: strongest inside, fading with the distance
+        float r = v_param.x;
+        vec2 q = vec2(r) - min(v_edge.xy, v_edge.zw);
+        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        cov *= pow(clamp(1.0 - max(d, 0.0) / v_uv.x, 0.0, 1.0), 2.2);
+    } else if (v_param.y < 0.5) {
         float r = v_param.x;
         if (r < 0.5) {
             cov *= span(v_edge.x, v_edge.z) * span(v_edge.y, v_edge.w);
@@ -158,7 +185,7 @@ struct Vertex {
     float edge[4];  // to the shape's left, top, right, bottom edge
     float clip[4];  // the same for the clip
     uint8_t color[4];
-    float radius, mode;  // mode: 0 shape, 1 alpha mask, 2 image
+    float radius, mode;  // mode: 0 shape, 1 alpha mask, 2 image, 3 glow, 4 kept layer, 5 ellipse
 };
 
 // What a batch of quads samples.
@@ -169,9 +196,118 @@ struct TexRef {
 };
 
 struct Batch {
+    // Draw: quads from `first`. The others carry no quads: the drawing of a kept
+    // layer starts (Begin) and ends (End), and its texture is laid over the picture (Blit).
+    enum Kind { Draw, Begin, End, Blit } kind = Draw;
     TexRef tex;
     size_t first = 0;  // vertex
     size_t quads = 0;
+    uint32_t layer = 0;
+    uint32_t target = 0;  // Draw: the kept layer it draws into, 0 for the screen
+    float x = 0, y = 0, w = 0, h = 0;  // Begin, Blit: where the layer is on the canvas
+    float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;  // Draw: where its quads are
+};
+
+// A layer the core asked to keep (ops::Layer): drawn into `tex` through `fbo`.
+struct KeptLayer {
+    Texture tex;
+    GLuint fbo = 0;
+};
+
+// What one quad of a frame draws, for finding what changed since the last
+// frame: equal signatures draw the same pixels.
+struct QInfo {
+    float x0, y0, x1, y1;  // where it draws (canvas pixels)
+    uint64_t sig;
+    bool vol = false;      // a plugin's surface: its pixels may have changed
+    int page = -1;         // a mask of this atlas page, sampling u0..u1, v0..v1
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+};
+
+// What of a target (the screen or a kept layer) is to be drawn again, in tiles.
+struct Tiles {
+    static constexpr int kTile = 64;
+    int w = 0, h = 0, tw = 0, th = 0;
+    bool full = true;
+    std::vector<uint8_t> bits;
+
+    void reset(int w_, int h_) {
+        w = w_, h = h_;
+        tw = (w + kTile - 1) / kTile, th = (h + kTile - 1) / kTile;
+        full = false;
+        bits.assign(size_t(tw) * size_t(th), 0);
+    }
+    void mark(float x0, float y0, float x1, float y1) {
+        if (full) return;
+        int a = std::max(0, int(std::floor(x0)) / kTile), b = std::max(0, int(std::floor(y0)) / kTile);
+        int c = std::min(tw - 1, int(std::ceil(x1)) / kTile), d = std::min(th - 1, int(std::ceil(y1)) / kTile);
+        if (x1 <= 0 || y1 <= 0 || x0 >= float(w) || y0 >= float(h)) return;
+        for (int ty = b; ty <= d; ++ty)
+            for (int tx = a; tx <= c; ++tx) bits[size_t(ty) * size_t(tw) + size_t(tx)] = 1;
+    }
+    void merge(const Tiles& o) {
+        if (full) return;
+        if (o.full || o.bits.size() != bits.size()) {
+            full = true;
+            return;
+        }
+        for (size_t i = 0; i < bits.size(); ++i) bits[i] |= o.bits[i];
+    }
+    // Rectangles (pixels) covering the dirty tiles: runs of a row joined with the same run above.
+    std::vector<Rect> rects(size_t max) const {
+        std::vector<Rect> out;
+        struct Run {
+            int a, b, y0;
+        };
+        std::vector<Run> open;
+        auto flush = [&](const Run& r, int y1) {
+            Rect q{r.a * kTile, r.y0 * kTile, std::min(w, r.b * kTile) - r.a * kTile, std::min(h, y1 * kTile) - r.y0 * kTile};
+            out.push_back(q);
+        };
+        for (int ty = 0; ty <= th; ++ty) {
+            std::vector<Run> row;
+            for (int tx = 0; ty < th && tx < tw;) {
+                if (!bits[size_t(ty) * size_t(tw) + size_t(tx)]) {
+                    ++tx;
+                    continue;
+                }
+                int a = tx;
+                while (tx < tw && bits[size_t(ty) * size_t(tw) + size_t(tx)]) ++tx;
+                row.push_back({a, tx, ty});
+            }
+            std::vector<Run> next;
+            for (auto& r : row) {
+                bool joined = false;
+                for (auto& o : open)
+                    if (o.a == r.a && o.b == r.b) {
+                        r.y0 = o.y0;
+                        o.a = -1;  // taken
+                        joined = true;
+                        break;
+                    }
+                (void)joined;
+                next.push_back(r);
+            }
+            for (auto& o : open)
+                if (o.a >= 0) flush(o, ty);
+            open = next;
+        }
+        if (out.size() > max) {
+            int x0 = w, y0 = h, x1 = 0, y1 = 0;
+            for (auto& r : out) {
+                x0 = std::min(x0, r.x), y0 = std::min(y0, r.y);
+                x1 = std::max(x1, r.x + r.w), y1 = std::max(y1, r.y + r.h);
+            }
+            out = {{x0, y0, x1 - x0, y1 - y0}};
+        }
+        return out;
+    }
+};
+
+// The quads of one target, this frame and the last one drawn.
+struct TargetList {
+    std::vector<QInfo> cur, prev;
+    bool have_prev = false;
 };
 
 class Gpu {
@@ -284,6 +420,7 @@ public:
         ::close(fd);
         ops_map_ = m == MAP_FAILED ? nullptr : static_cast<const uint8_t*>(m);
         ops_size_ = ops_map_ ? size : 0;
+        force_full_ = true;
         verts_.clear();
         batches_.clear();
     }
@@ -367,6 +504,10 @@ public:
     // Uploads what changed, draws, and starts showing the frame.
     void frame(const Json& msg) {
         if (ops_map_) return ops_frame(msg);
+        force_full_ = true;
+        hist_.clear();
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         int seq = msg["seq"].as_int();
         if (canvas_map_)
             for (const auto& r : msg["canvas"].items()) upload(canvas_tex_, canvas_map_, canvas_tex_.w * 4, Rect::from(r));
@@ -411,7 +552,9 @@ public:
 
     // A frame from drawing commands: new ones are turned into quads (the
     // masks and images they bring uploaded); without new ones, the last
-    // frame's quads are drawn again with the surfaces' new contents.
+    // frame's quads are drawn again with the surfaces' new contents. Only
+    // what differs from the last frame is drawn again: the screen keeps its
+    // pixels (the buffers of a window surface know how old they are).
     void ops_frame(const Json& msg) {
         int seq = msg["seq"].as_int();
         layer_tex_.clear();
@@ -438,38 +581,345 @@ public:
             layer_native_.push_back(native);
         }
         if (msg.contains("ops")) parse_ops(size_t(msg["ops"].as_number()));
+        for (auto& kv : lists_)
+            for (auto& q : kv.second.cur)
+                if (q.vol) q.sig = ++unique_;  // a surface may show something new
+        if (stats_) report_stats();
         glFinish();  // the core may reuse the command memory and the surface buffers now
         send_seq("uploaded", seq);
 
-        glViewport(0, 0, w_, h_);
-        glDisable(GL_SCISSOR_TEST);
-        glClearColor(0, 0, 0, 1);
-        glClear(GL_COLOR_BUFFER_BIT);
+        double gpu_t0 = 0;
+        if (stats_) {
+            glFinish();
+            gpu_t0 = mono_now();
+        }
         glUseProgram(ops_prog_);
-        glUniform2f(u_size_, float(w_), float(h_));
         glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_SCISSOR_TEST);
         glActiveTexture(GL_TEXTURE0);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+        if (msg.contains("ops")) glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(verts_.size() * sizeof(Vertex)), verts_.data(), GL_STREAM_DRAW);
         for (GLint a : {o_pos_, o_uv_, o_edge_, o_clip_, o_color_, o_param_})
             if (a >= 0) glEnableVertexAttribArray(GLuint(a));
-        for (const auto& b : batches_) {
-            glBindTexture(GL_TEXTURE_2D, texture_of(b.tex));  // 0 when a surface is gone: black
-            bool native = b.tex.kind == TexRef::Layer && size_t(b.tex.index) < layer_native_.size() &&
-                          layer_native_[size_t(b.tex.index)];
-            glUniform1f(u_native_, native ? 1.f : 0.f);
-            const Vertex* v = verts_.data() + b.first;
-            glVertexAttribPointer(GLuint(o_pos_), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), &v->x);
-            glVertexAttribPointer(GLuint(o_uv_), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), &v->u);
-            glVertexAttribPointer(GLuint(o_edge_), 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), v->edge);
-            glVertexAttribPointer(GLuint(o_clip_), 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), v->clip);
-            glVertexAttribPointer(GLuint(o_color_), 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), v->color);
-            glVertexAttribPointer(GLuint(o_param_), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), &v->radius);
-            glDrawElements(GL_TRIANGLES, GLsizei(b.quads * 6), GL_UNSIGNED_SHORT, quad_indices_.data());
+
+        // Kept layers drawn this frame first: what changed in them is part of the screen's damage.
+        Tiles from_layers;
+        from_layers.reset(w_, h_);
+        bool any_layer = false;
+        for (const auto& b : batches_)
+            if (b.kind == Batch::Begin) {
+                draw_kept_layer(b, from_layers);
+                any_layer = true;
+            }
+
+        // The screen.
+        TargetList& main = lists_[0];
+        Tiles dm;
+        dm.reset(w_, h_);
+        if (force_full_ || !main.have_prev) dm.full = true;
+        else {
+            diff_lists(main.prev, main.cur, 0, 0, dm);
+            dm.merge(from_layers);
+        }
+        Tiles region = dm;
+        int age = 1;
+        if (surf_ != EGL_NO_SURFACE) {
+            EGLint a = 0;
+            age = age_ext_ && eglQuerySurface(dpy_, surf_, EGL_BUFFER_AGE_EXT, &a) ? a : 0;
+        }
+        if (age <= 0 || size_t(age - 1) > hist_.size()) region.full = true;
+        else
+            for (int k = 0; k < age - 1; ++k) region.merge(hist_[size_t(k)]);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);  // 0 on the screen
+        glViewport(0, 0, w_, h_);
+        glUniform2f(u_size_, float(w_), float(h_));
+        glUniform2f(u_origin_, 0.f, 0.f);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        draw_target(0, region, w_, h_, 0.f, 0.f, first_quad_covers_screen() ? -1 : 1);
+        if (verify_ && fbo_) verify_frame();
+        hist_.push_front(dm);
+        if (hist_.size() > 4) hist_.pop_back();
+        main.prev = main.cur;
+        main.have_prev = true;
+        force_full_ = false;
+        (void)any_layer;
+
+        if (stats_) {
+            glFinish();
+            bool redrawn = any_layer && from_layers.full;
+            static unsigned n = 0;
+            double fraction = 1;
+            size_t nrects = 0;
+            if (!region.full) {
+                auto rs = region.rects(kMaxParts);
+                nrects = rs.size();
+                double area = 0;
+                for (auto& r : rs) area += double(r.w) * double(r.h);
+                fraction = area / (double(w_) * double(h_));
+            }
+            gpu_ms_hit_ += (mono_now() - gpu_t0) * 1000;
+            if (++n % 100 == 0) {
+                std::fprintf(stderr, "gpu time: %.1f ms per frame, the last one redrew %.0f%% of the screen in %zu parts (age %d)\n",
+                             gpu_ms_hit_ / 100, fraction * 100, nrects, age);
+                gpu_ms_hit_ = 0;
+            }
+            (void)redrawn;
         }
         present(seq);
     }
 
+    // FACET_GPU_VERIFY (offscreen): draws everything again from scratch and compares it
+    // with what the partial drawing made, for the kept layers and for the screen.
+    void verify_frame() {
+        auto read = [&](GLuint fbo, int w, int h, std::vector<uint8_t>& out) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            out.resize(size_t(w) * size_t(h) * 4);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+        };
+        auto count = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+            size_t bad = 0;
+            for (size_t i = 0; i + 3 < a.size(); i += 4)
+                if (std::memcmp(&a[i], &b[i], 4) != 0) ++bad;
+            return bad;
+        };
+        auto scratch = [&](int w, int h, GLuint& fbo, GLuint& tex) {
+            Texture t = make_texture(w, h, false);
+            tex = t.id;
+            glGenFramebuffers(1, &fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        };
+        size_t bad_layers = 0, bad_screen = 0;
+        std::vector<uint8_t> a, b;
+        for (const auto& bt : batches_) {
+            if (bt.kind != Batch::Begin) continue;
+            auto it = kept_.find(bt.layer);
+            if (it == kept_.end()) continue;
+            const int w = it->second.tex.w, h = it->second.tex.h;
+            GLuint fbo, tex;
+            scratch(w, h, fbo, tex);
+            glViewport(0, 0, w, h);
+            glUniform2f(u_size_, float(w), float(h));
+            glUniform2f(u_origin_, bt.x, bt.y);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            Tiles all;
+            all.full = true;
+            draw_target(bt.layer, all, w, h, bt.x, bt.y, 0);
+            read(fbo, w, h, a);
+            read(it->second.fbo, w, h, b);
+            bad_layers += count(a, b);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &fbo);
+            glDeleteTextures(1, &tex);
+        }
+        {
+            GLuint fbo, tex;
+            scratch(w_, h_, fbo, tex);
+            glViewport(0, 0, w_, h_);
+            glUniform2f(u_size_, float(w_), float(h_));
+            glUniform2f(u_origin_, 0.f, 0.f);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            Tiles all;
+            all.full = true;
+            draw_target(0, all, w_, h_, 0.f, 0.f, first_quad_covers_screen() ? -1 : 1);
+            read(fbo, w_, h_, a);
+            read(fbo_, w_, h_, b);
+            bad_screen = count(a, b);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &fbo);
+            glDeleteTextures(1, &tex);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+        glViewport(0, 0, w_, h_);
+        ++verified_;
+        if (bad_layers || bad_screen) {
+            ++verify_bad_;
+            std::fprintf(stderr, "verify: frame %u differs: %zu pixels of a kept layer, %zu of the screen\n", verified_, bad_layers,
+                         bad_screen);
+        }
+        if (verified_ % 200 == 0)
+            std::fprintf(stderr, "verify: %u frames checked, %u differed\n", verified_, verify_bad_);
+    }
+
+    // Whether the screen's first quad is opaque and covers all of it (then clearing is pointless).
+    bool first_quad_covers_screen() const {
+        for (const auto& b : batches_) {
+            if (b.kind != Batch::Draw && b.kind != Batch::Blit) continue;
+            if (b.kind != Batch::Draw || b.target != 0 || b.quads == 0) return false;
+            const Vertex& v = verts_[b.first];
+            if (v.mode != 0.f || v.radius >= 0.5f || v.color[3] != 255) return false;
+            return v.x - v.edge[0] <= 0 && v.y - v.edge[1] <= 0 && v.x + v.edge[2] >= float(w_) &&
+                   v.y + v.edge[3] >= float(h_) && v.x - v.clip[0] <= 0 && v.y - v.clip[1] <= 0 &&
+                   v.x + v.clip[2] >= float(w_) && v.y + v.clip[3] >= float(h_);
+        }
+        return false;
+    }
+
+    // What differs between the last frame's quads and this frame's of a target (`ox`, `oy`:
+    // where the target starts on the canvas, added to every position).
+    void diff_lists(const std::vector<QInfo>& prev, const std::vector<QInfo>& cur, float ox, float oy, Tiles& d) {
+        auto mark = [&](const QInfo& q) { d.mark(q.x0 + ox, q.y0 + oy, q.x1 + ox, q.y1 + oy); };
+        if (prev.size() == cur.size()) {
+            for (size_t i = 0; i < cur.size(); ++i)
+                if (prev[i].sig != cur[i].sig) {
+                    mark(prev[i]);
+                    mark(cur[i]);
+                }
+        } else {
+            size_t n = prev.size(), m = cur.size(), p = 0, sfx = 0;
+            while (p < std::min(n, m) && prev[p].sig == cur[p].sig) ++p;
+            while (sfx < std::min(n, m) - p && prev[n - 1 - sfx].sig == cur[m - 1 - sfx].sig) ++sfx;
+            for (size_t i = p; i < n - sfx; ++i) mark(prev[i]);
+            for (size_t i = p; i < m - sfx; ++i) mark(cur[i]);
+        }
+        // Masks of an atlas page that was written to may show something else now.
+        for (const auto& q : cur) {
+            if (q.page < 0) continue;
+            for (const auto& u : uploads_) {
+                if (u.page != q.page) continue;
+                const float k = 1.f / float(ops::kAtlasSize);
+                if (q.u0 < float(u.u + u.w) * k && q.u1 > float(u.u) * k && q.v0 < float(u.v + u.h) * k &&
+                    q.v1 > float(u.v) * k) {
+                    mark(q);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Draws the dirty parts of a target: the screen (id 0, the current framebuffer) or a kept layer.
+    // `ox`, `oy`: its place on the canvas; `clear`: 1 black, 0 transparent, -1 not at all.
+    void draw_target(uint32_t id, const Tiles& dirty, int tw, int th, float ox, float oy, int clear) {
+        std::vector<Rect> rects;
+        if (dirty.full) rects = {{0, 0, tw, th}};
+        else {
+            rects = dirty.rects(kMaxParts);
+            double area = 0;
+            for (auto& r : rects) area += double(r.w) * double(r.h);
+            if (area > 0.8 * double(tw) * double(th)) rects = {{0, 0, tw, th}};
+        }
+        for (const Rect& r : rects) {
+            glScissor(r.x, th - (r.y + r.h), r.w, r.h);
+            if (clear >= 0) {
+                glClearColor(0, 0, 0, clear ? 1.f : 0.f);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            const float rx0 = float(r.x) + ox, ry0 = float(r.y) + oy, rx1 = rx0 + float(r.w), ry1 = ry0 + float(r.h);
+            for (const auto& b : batches_) {
+                if (b.kind == Batch::Blit && id == 0) {
+                    if (b.x < rx1 && b.x + b.w > rx0 && b.y < ry1 && b.y + b.h > ry0) blit_kept(b);
+                    continue;
+                }
+                if (b.kind != Batch::Draw || b.target != id) continue;
+                if (b.bx0 >= rx1 || b.bx1 <= rx0 || b.by0 >= ry1 || b.by1 <= ry0) continue;
+                glBindTexture(GL_TEXTURE_2D, texture_of(b.tex));  // 0 when a surface is gone: black
+                bool native = b.tex.kind == TexRef::Layer && size_t(b.tex.index) < layer_native_.size() &&
+                              layer_native_[size_t(b.tex.index)];
+                glUniform1f(u_native_, native ? 1.f : 0.f);
+                set_attribs(b.first);
+                glDrawElements(GL_TRIANGLES, GLsizei(b.quads * 6), GL_UNSIGNED_SHORT, nullptr);
+            }
+        }
+    }
+
+    // A kept layer that has to be drawn (again): into its texture, only where it changed. What
+    // changed is added to `screen_damage` (canvas pixels).
+    void draw_kept_layer(const Batch& b, Tiles& screen_damage) {
+        const int w = std::max(1, int(std::ceil(b.w))), h = std::max(1, int(std::ceil(b.h)));
+        KeptLayer& k = kept_[b.layer];
+        bool fresh = false;
+        if (k.tex.id && (k.tex.w != w || k.tex.h != h)) {
+            glDeleteFramebuffers(1, &k.fbo);
+            glDeleteTextures(1, &k.tex.id);
+            k = KeptLayer{};
+        }
+        if (!k.tex.id) {
+            k.tex = make_texture(w, h, false);
+            glGenFramebuffers(1, &k.fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, k.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, k.tex.id, 0);
+            fresh = true;
+        }
+        TargetList& list = lists_[b.layer];
+        Tiles d;
+        d.reset(w, h);
+        if (fresh || force_full_ || !list.have_prev) d.full = true;
+        else diff_lists(list.prev, list.cur, -b.x, -b.y, d);
+        if (stats_ && !d.full) {
+            static unsigned nn = 0;
+            if (++nn % 15 == 1) {
+                size_t n = std::min(list.prev.size(), list.cur.size()), changed = 0;
+                double big = 0;
+                size_t bigi = 0;
+                for (size_t i = 0; i < n; ++i)
+                    if (list.prev[i].sig != list.cur[i].sig) {
+                        ++changed;
+                        double a = double(list.cur[i].x1 - list.cur[i].x0) * double(list.cur[i].y1 - list.cur[i].y0);
+                        if (a > big) big = a, bigi = i;
+                    }
+                std::fprintf(stderr, "layer %u: %zu of %zu quads (was %zu) changed; the biggest #%zu is %.0fx%.0f at %.0f,%.0f\n", b.layer,
+                             changed, list.cur.size(), list.prev.size(), bigi, bigi < n ? list.cur[bigi].x1 - list.cur[bigi].x0 : 0.f,
+                             bigi < n ? list.cur[bigi].y1 - list.cur[bigi].y0 : 0.f, bigi < n ? list.cur[bigi].x0 : 0.f,
+                             bigi < n ? list.cur[bigi].y0 : 0.f);
+            }
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, k.fbo);
+        glViewport(0, 0, w, h);
+        glUniform2f(u_size_, float(w), float(h));
+        glUniform2f(u_origin_, b.x, b.y);
+        // Colours end up premultiplied, as laid over the picture later.
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        draw_target(b.layer, d, w, h, b.x, b.y, 0);
+        list.prev = list.cur;
+        list.have_prev = true;
+        if (d.full) screen_damage.mark(b.x, b.y, b.x + float(w), b.y + float(h));
+        else
+            for (const Rect& r : d.rects(kMaxParts))
+                screen_damage.mark(b.x + float(r.x), b.y + float(r.y), b.x + float(r.x + r.w), b.y + float(r.y + r.h));
+    }
+
+    // A kept layer's texture over the screen.
+    void blit_kept(const Batch& b) {
+        auto it = kept_.find(b.layer);
+        if (it == kept_.end() || !it->second.tex.id) return;
+        const float x0 = b.x, y0 = b.y, x1 = b.x + float(it->second.tex.w), y1 = b.y + float(it->second.tex.h);
+        const float big = 1e4f;
+        Vertex v[4];
+        const float px[4] = {x0, x1, x0, x1}, py[4] = {y0, y0, y1, y1};
+        const float pu[4] = {0, 1, 0, 1}, pv[4] = {1, 1, 0, 0};  // the texture is upside down
+        for (int i = 0; i < 4; ++i) {
+            v[i].x = px[i], v[i].y = py[i], v[i].u = pu[i], v[i].v = pv[i];
+            for (int k = 0; k < 4; ++k) v[i].edge[k] = v[i].clip[k] = big;
+            std::memset(v[i].color, 255, 4);
+            v[i].radius = 0, v[i].mode = 4;
+        }
+        glBindTexture(GL_TEXTURE_2D, it->second.tex.id);
+        glUniform1f(u_native_, 0.f);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glBindBuffer(GL_ARRAY_BUFFER, blit_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STREAM_DRAW);
+        set_attribs(0);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+
+    // The vertex attributes, read from the bound buffer starting at vertex `first`.
+    void set_attribs(size_t first) {
+        const auto* base = reinterpret_cast<const char*>(first * sizeof(Vertex));
+        glVertexAttribPointer(GLuint(o_pos_), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, x));
+        glVertexAttribPointer(GLuint(o_uv_), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, u));
+        glVertexAttribPointer(GLuint(o_edge_), 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, edge));
+        glVertexAttribPointer(GLuint(o_clip_), 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, clip));
+        glVertexAttribPointer(GLuint(o_color_), 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), base + offsetof(Vertex, color));
+        glVertexAttribPointer(GLuint(o_param_), 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), base + offsetof(Vertex, radius));
+    }
+
     void power(bool on) {
+        force_full_ = true;
+        hist_.clear();
         if (drm_ >= 0 && dpms_prop_) drmModeConnectorSetProperty(drm_, conn_, dpms_prop_, on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF);
     }
 
@@ -484,9 +934,36 @@ public:
     }
 
     void set_dump(const char* path) { dump_ = path ? path : ""; }
+    void enable_stats() { stats_ = true; }
+    void enable_verify() { verify_ = true; }
 
 private:
     static constexpr size_t kMaxBatchQuads = 16000;  // 16-bit indices
+    static constexpr size_t kMaxParts = 48;          // separate rectangles drawn for one frame's damage
+    bool stats_ = false;
+    std::unordered_map<uint32_t, KeptLayer> kept_;
+    std::unordered_map<uint32_t, TargetList> lists_;  // 0: the screen; else a kept layer
+    uint32_t cur_target_ = 0;                          // while the commands are read
+    bool force_full_ = true;                           // nothing to compare with: draw everything
+    uint64_t unique_ = 0;
+    struct AtlasWrite {
+        int page, u, v, w, h;
+    };
+    std::vector<AtlasWrite> uploads_;  // this frame's writes into the mask atlas
+    std::deque<Tiles> hist_;           // what the last frames changed on the screen (newest first)
+    bool age_ext_ = false;
+    bool verify_ = false;
+    GLuint vbo_ = 0, blit_vbo_ = 0, ebo_ = 0;
+    unsigned verified_ = 0, verify_bad_ = 0;
+    Batch open_layer_;
+    bool in_layer_ = false;
+    unsigned stat_hit_ = 0, stat_miss_ = 0, gpu_n_hit_ = 0, gpu_n_miss_ = 0;
+    double gpu_ms_hit_ = 0, gpu_ms_miss_ = 0;
+    static double mono_now() {
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9;
+    }
 
     GLuint texture_of(const TexRef& r) const {
         switch (r.kind) {
@@ -530,18 +1007,41 @@ private:
         float x0, y0, x1, y1;
     };
 
+    // FNV-style hash of memory, a word at a time.
+    static uint64_t hash_mem(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            uint64_t w;
+            std::memcpy(&w, b + i, 8);
+            h = (h ^ w) * 1099511628211ull;
+            h ^= h >> 29;
+        }
+        for (; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+        return h;
+    }
+
+    // `texsig`: what the sampled pixels are (a hash of them, or the atlas page); `vol`: a
+    // plugin's surface; `page`: an atlas page, whose uploads can change what is sampled.
     void quad(const Box& g, float u0, float v0, float u1, float v1, const Box& edge, uint32_t color, float radius,
-              float mode, TexRef tex) {
+              float mode, TexRef tex, uint64_t texsig = 0, bool vol = false, int page = -1,
+              const uint32_t* vertex_colors = nullptr) {
         // Shapes do not sample: they join any batch. Masks and images need
         // their texture bound, so a batch takes them while it has none or the same.
-        bool need = mode > 0.5f;
-        Batch* b = batches_.empty() ? nullptr : &batches_.back();
+        bool need = mode > 0.5f && mode < 2.5f;
+        Batch* b = batches_.empty() || batches_.back().kind != Batch::Draw || batches_.back().target != cur_target_
+                       ? nullptr
+                       : &batches_.back();
         if (b && b->quads < kMaxBatchQuads && need && !(b->tex == tex)) {
             if (b->tex.kind == TexRef::None) b->tex = tex;
             else b = nullptr;
         }
         if (!b || b->quads >= kMaxBatchQuads) {
-            batches_.push_back({need ? tex : TexRef{}, verts_.size(), 0});
+            Batch nb;
+            nb.tex = need ? tex : TexRef{};
+            nb.first = verts_.size();
+            nb.target = cur_target_;
+            batches_.push_back(nb);
             b = &batches_.back();
         }
         const float px[4] = {g.x0, g.x1, g.x0, g.x1}, py[4] = {g.y0, g.y0, g.y1, g.y1};
@@ -553,17 +1053,63 @@ private:
             v.edge[2] = edge.x1 - px[i], v.edge[3] = edge.y1 - py[i];
             v.clip[0] = px[i] - clip_.x0, v.clip[1] = py[i] - clip_.y0;
             v.clip[2] = clip_.x1 - px[i], v.clip[3] = clip_.y1 - py[i];
-            std::memcpy(v.color, &color, 4);
+            std::memcpy(v.color, vertex_colors ? &vertex_colors[i] : &color, 4);
             v.radius = radius, v.mode = mode;
             verts_.push_back(v);
         }
         ++b->quads;
+        b->bx0 = std::min(b->bx0, g.x0), b->by0 = std::min(b->by0, g.y0);
+        b->bx1 = std::max(b->bx1, g.x1), b->by1 = std::max(b->by1, g.y1);
+        QInfo q{g.x0, g.y0, g.x1, g.y1, hash_mem(&verts_[verts_.size() - 4], 4 * sizeof(Vertex)) ^ (texsig * 0x9E3779B97F4A7C15ull)};
+        q.vol = vol;
+        q.page = page;
+        q.u0 = u0, q.v0 = v0, q.u1 = u1, q.v1 = v1;
+        lists_[cur_target_].cur.push_back(q);
+    }
+
+    // A kept layer laid over the screen, as the screen's list sees it.
+    void note_blit(uint32_t id, float x, float y, float w, float h) {
+        const float k[5] = {float(id), x, y, w, h};
+        QInfo q{x, y, x + w, y + h, hash_mem(k, sizeof k, 0xB117ull)};
+        lists_[0].cur.push_back(q);
+    }
+
+    // FACET_GPU_STATS: how much the quads of a frame cover, once in a while.
+    void report_stats() {
+        bool redrawn = false;
+        for (const auto& b : batches_) redrawn = redrawn || b.kind == Batch::Begin;
+        unsigned& n = redrawn ? stat_miss_ : stat_hit_;
+        if (n++ % 60 != 1) return;
+        std::fprintf(stderr, "gpu stats (a kept layer %s):\n", redrawn ? "was drawn" : "was reused");
+        double total = 0, blended = 0, texd = 0;
+        for (size_t i = 0; i + 3 < verts_.size(); i += 4) {
+            const Vertex &a = verts_[i], &d = verts_[i + 3];
+            double area = double(d.x - a.x) * double(d.y - a.y);
+            total += area;
+            if (d.mode > 0.5f) texd += area;
+            if (a.color[3] < 255 || a.radius >= 0.5f || a.mode > 0.5f) blended += area;
+        }
+        double screen = double(w_) * double(h_);
+        std::vector<std::pair<double, size_t>> big;
+        for (size_t i = 0; i + 3 < verts_.size(); i += 4)
+            big.push_back({double(verts_[i + 3].x - verts_[i].x) * double(verts_[i + 3].y - verts_[i].y), i});
+        std::sort(big.rbegin(), big.rend());
+        for (size_t k = 0; k < big.size() && k < 5; ++k) {
+            const Vertex &a = verts_[big[k].second], &d = verts_[big[k].second + 3];
+            std::fprintf(stderr, "  quad #%zu %.0fx%.0f at %.0f,%.0f = %.2fx, alpha %d, radius %.0f, mode %.0f\n", big[k].second / 4,
+                         d.x - a.x, d.y - a.y, a.x, a.y, big[k].first / screen, a.color[3], a.radius, a.mode);
+        }
+        std::fprintf(stderr, "gpu stats: %zu quads, %zu batches, covers %.2fx the screen (%.2fx blended, %.2fx textured)\n",
+                     verts_.size() / 4, batches_.size(), total / screen, blended / screen, texd / screen);
     }
 
     // Reads the commands into quads; uploads masks and images on the way.
     void parse_ops(size_t bytes) {
         verts_.clear();
         batches_.clear();
+        for (auto& kv : lists_) kv.second.cur.clear();
+        cur_target_ = 0;
+        uploads_.clear();
         clip_ = {0, 0, float(w_), float(h_)};
         size_t inline_used = 0, images_used = 0;
         const Box none{-1e4f, -1e4f, 1e4f, 1e4f};  // no shape edges (masks and images)
@@ -593,6 +1139,87 @@ private:
                     quad(g, 0, 0, 0, 0, shape, o->color, o->radius, 0, {});
                     break;
                 }
+                case ops::kGradient: {
+                    if (payload < sizeof(ops::Gradient)) break;
+                    const auto* o = reinterpret_cast<const ops::Gradient*>(rec);
+                    Box shape{o->x, o->y, o->x + o->w, o->y + o->h_};
+                    Box g{std::max(shape.x0 - 1, clip_.x0 - 1), std::max(shape.y0 - 1, clip_.y0 - 1),
+                          std::min(shape.x1 + 1, clip_.x1 + 1), std::min(shape.y1 + 1, clip_.y1 + 1)};
+                    if (g.x1 <= g.x0 || g.y1 <= g.y0) break;
+                    // The colour of each corner of the quad, along the gradient.
+                    auto mix = [&](float t) {
+                        t = std::min(1.f, std::max(0.f, t));
+                        uint32_t out = 0;
+                        for (int ch = 0; ch < 4; ++ch) {
+                            float a = float((o->from >> (8 * ch)) & 0xFF), b = float((o->to >> (8 * ch)) & 0xFF);
+                            out |= uint32_t(a + (b - a) * t + 0.5f) << (8 * ch);
+                        }
+                        return out;
+                    };
+                    const float px[4] = {g.x0, g.x1, g.x0, g.x1}, py[4] = {g.y0, g.y0, g.y1, g.y1};
+                    uint32_t vc[4];
+                    for (int i = 0; i < 4; ++i)
+                        vc[i] = o->vertical ? mix((py[i] - shape.y0) / std::max(1.f, shape.y1 - shape.y0))
+                                            : mix((px[i] - shape.x0) / std::max(1.f, shape.x1 - shape.x0));
+                    quad(g, 0, 0, 0, 0, shape, o->from, o->radius, 0, {}, 0, false, -1, vc);
+                    break;
+                }
+                case ops::kEllipse: {
+                    if (payload < sizeof(ops::Ellipse)) break;
+                    const auto* o = reinterpret_cast<const ops::Ellipse*>(rec);
+                    Box shape{o->x, o->y, o->x + o->w, o->y + o->h_};
+                    Box g{std::max(shape.x0 - 1, clip_.x0 - 1), std::max(shape.y0 - 1, clip_.y0 - 1),
+                          std::min(shape.x1 + 1, clip_.x1 + 1), std::min(shape.y1 + 1, clip_.y1 + 1)};
+                    if (g.x1 <= g.x0 || g.y1 <= g.y0) break;
+                    quad(g, 0, 0, 0, 0, shape, o->color, 0, 5, {});
+                    break;
+                }
+                case ops::kGlow: {
+                    if (payload < sizeof(ops::Glow)) break;
+                    const auto* o = reinterpret_cast<const ops::Glow*>(rec);
+                    Box shape{o->x, o->y, o->x + o->w, o->y + o->h_};
+                    // The quad reaches as far as the light does, never past the clip.
+                    float reach = o->spread + 1;
+                    Box g{std::max(shape.x0 - reach, clip_.x0 - 1), std::max(shape.y0 - reach, clip_.y0 - 1),
+                          std::min(shape.x1 + reach, clip_.x1 + 1), std::min(shape.y1 + reach, clip_.y1 + 1)};
+                    if (g.x1 <= g.x0 || g.y1 <= g.y0) break;
+                    quad(g, o->spread, 0, o->spread, 0, shape, o->color, o->radius, 3, {});
+                    break;
+                }
+                case ops::kLayer: {
+                    if (payload < sizeof(ops::Layer)) break;
+                    const auto* o = reinterpret_cast<const ops::Layer*>(rec);
+                    Batch m;
+                    m.layer = o->id, m.x = o->x, m.y = o->y, m.w = o->w, m.h = o->h_;
+                    if (o->use) {
+                        if (kept_.count(o->id)) {
+                            m.kind = Batch::Blit;
+                            batches_.push_back(m);
+                            note_blit(o->id, o->x, o->y, o->w, o->h_);
+                        }
+                    } else {
+                        m.kind = Batch::Begin;
+                        batches_.push_back(m);
+                        open_layer_ = m;
+                        in_layer_ = true;
+                        cur_target_ = o->id;
+                        clip_ = {0, 0, float(w_), float(h_)};
+                    }
+                    break;
+                }
+                case ops::kLayerEnd: {
+                    if (!in_layer_) break;
+                    in_layer_ = false;
+                    Batch e = open_layer_;
+                    e.kind = Batch::End;
+                    batches_.push_back(e);
+                    e.kind = Batch::Blit;
+                    batches_.push_back(e);
+                    cur_target_ = 0;
+                    note_blit(e.layer, e.x, e.y, e.w, e.h);
+                    clip_ = {0, 0, float(w_), float(h_)};
+                    break;
+                }
                 case ops::kUpload: {
                     if (payload < sizeof(ops::Upload)) break;
                     const auto* o = reinterpret_cast<const ops::Upload*>(rec);
@@ -601,8 +1228,10 @@ private:
                         break;
                     Texture& page = pooled(pages_, o->page, ops::kAtlasSize, ops::kAtlasSize, GL_ALPHA);
                     alpha_upload(page.id, o->u, o->v, o->w, o->h_, reinterpret_cast<const uint8_t*>(o + 1));
+                    uploads_.push_back({int(o->page), o->u, o->v, o->w, o->h_});
                     break;
                 }
+                case ops::kAtlasReset: force_full_ = true; break;
                 case ops::kMask: {
                     if (payload < sizeof(ops::Mask)) break;
                     const auto* o = reinterpret_cast<const ops::Mask*>(rec);
@@ -613,11 +1242,12 @@ private:
                         size_t slot = inline_used++;
                         Texture& t = pooled(inline_, slot, o->w, o->h_, GL_ALPHA);
                         alpha_upload(t.id, 0, 0, o->w, o->h_, reinterpret_cast<const uint8_t*>(o + 1));
-                        quad(g, 0, 0, 1, 1, none, o->color, 0, 1, {TexRef::Inline, int(slot)});
+                        quad(g, 0, 0, 1, 1, none, o->color, 0, 1, {TexRef::Inline, int(slot)},
+                             hash_mem(o + 1, size_t(o->w) * size_t(o->h_)));
                     } else if (o->page < uint32_t(ops::kMaxAtlasPages)) {
                         const float s = 1.f / float(ops::kAtlasSize);
                         quad(g, float(o->u) * s, float(o->v) * s, float(o->u + o->w) * s, float(o->v + o->h_) * s, none,
-                             o->color, 0, 1, {TexRef::Page, int(o->page)});
+                             o->color, 0, 1, {TexRef::Page, int(o->page)}, uint64_t(o->page) + 1, false, int(o->page));
                     }
                     break;
                 }
@@ -627,7 +1257,7 @@ private:
                     if (o->layer >= layer_dst_.size()) break;
                     const Rect& d = layer_dst_[o->layer];
                     Box g{float(d.x), float(d.y), float(d.x + d.w), float(d.y + d.h)};
-                    quad(g, 0, 0, 1, 1, none, 0xFFFFFFFFu, 0, 2, {TexRef::Layer, int(o->layer)});
+                    quad(g, 0, 0, 1, 1, none, 0xFFFFFFFFu, 0, 2, {TexRef::Layer, int(o->layer)}, 0, true);
                     break;
                 }
                 case ops::kImage: {
@@ -638,7 +1268,8 @@ private:
                     Texture& t = pooled(images_, slot, o->w, o->h_, GL_RGBA);
                     upload(t, reinterpret_cast<const uint8_t*>(o + 1), o->w * 4, {0, 0, o->w, o->h_});
                     Box g{o->x, o->y, o->x + o->dw, o->y + o->dh};
-                    quad(g, 0, 0, 1, 1, none, 0xFFFFFFFFu, 0, 2, {TexRef::Image, int(slot)});
+                    quad(g, 0, 0, 1, 1, none, 0xFFFFFFFFu, 0, 2, {TexRef::Image, int(slot)},
+                         hash_mem(o + 1, size_t(o->w) * size_t(o->h_) * 4));
                     break;
                 }
                 default: break;  // kAtlasReset and unknown records: nothing to draw
@@ -704,6 +1335,7 @@ private:
         o_param_ = glGetAttribLocation(ops_prog_, "param");
         u_size_ = glGetUniformLocation(ops_prog_, "size");
         u_native_ = glGetUniformLocation(ops_prog_, "native");
+        u_origin_ = glGetUniformLocation(ops_prog_, "origin");
         // GPU buffers of plugins: imported as EGL images.
         const char* egl_ext = eglQueryString(dpy_, EGL_EXTENSIONS);
         const char* gl_ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
@@ -711,6 +1343,7 @@ private:
         destroy_image_ = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
         image_target_ =
             reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+        age_ext_ = egl_ext && std::strstr(egl_ext, "EGL_EXT_buffer_age");
         dmabuf_ = egl_ext && gl_ext && std::strstr(egl_ext, "EGL_EXT_image_dma_buf_import") &&
                   std::strstr(gl_ext, "GL_OES_EGL_image") && create_image_ && destroy_image_ && image_target_;
         dmabuf_modifiers_ = dmabuf_ && std::strstr(egl_ext, "EGL_EXT_image_dma_buf_import_modifiers");
@@ -722,6 +1355,12 @@ private:
             const GLushort idx[6] = {b, GLushort(b + 1), GLushort(b + 2), GLushort(b + 2), GLushort(b + 1), GLushort(b + 3)};
             std::copy(idx, idx + 6, quad_indices_.begin() + long(q * 6));
         }
+        glGenBuffers(1, &vbo_);
+        glGenBuffers(1, &blit_vbo_);
+        glGenBuffers(1, &ebo_);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(quad_indices_.size() * sizeof(GLushort)), quad_indices_.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         a_pos_ = glGetAttribLocation(prog_, "pos");
         a_uv_ = glGetAttribLocation(prog_, "uv");
         u_opaque_ = glGetUniformLocation(prog_, "opaque");
@@ -925,7 +1564,7 @@ private:
     GLuint prog_ = 0, fbo_ = 0, rbo_ = 0, ops_prog_ = 0;
     GLint a_pos_ = -1, a_uv_ = -1, u_opaque_ = -1;
     GLint o_pos_ = -1, o_uv_ = -1, o_edge_ = -1, o_clip_ = -1, o_color_ = -1, o_param_ = -1, u_size_ = -1,
-          u_native_ = -1;
+          u_native_ = -1, u_origin_ = -1;
     PFNEGLCREATEIMAGEKHRPROC create_image_ = nullptr;
     PFNEGLDESTROYIMAGEKHRPROC destroy_image_ = nullptr;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_ = nullptr;
@@ -976,6 +1615,8 @@ int main(int argc, char** argv) {
     ch.adopt(fd, false);
     Gpu gpu(ch);
     gpu.set_dump(dump);
+    if (std::getenv("FACET_GPU_STATS")) gpu.enable_stats();
+    if (std::getenv("FACET_GPU_VERIFY")) gpu.enable_verify();
     std::string error;
     bool ok = card ? gpu.init_kms(card, error) : gpu.init_offscreen(ow, oh, device, error);
     Json hello = Json::object();

@@ -24,6 +24,13 @@ public:
     // GPU drawing: no pixels; every draw becomes a command in `rec`.
     void record_into(Recorder* rec, int w, int h);
     bool recording() const { return rec_ != nullptr; }
+    // Light around `r` (GPU only, when recording(); the processor builds its own).
+    void glow(const Rect& r, float radius, float spread, Color c);
+    // A part that rarely changes (a theme's background). With the GPU it is kept as a
+    // texture while `stamp` stays the same: false means it is there already and nothing
+    // is to be drawn; true (always, with the processor): draw it, then call layer_end().
+    bool layer_begin(uint32_t id, uint64_t stamp, const Rect& r);
+    void layer_end();
     int width() const { return w_; }
     int height() const { return h_; }
     const uint32_t* pixels() const { return px_; }
@@ -41,6 +48,9 @@ public:
     void fill_rect(const Rect& r, Color c);
     void fill_path(const Path& p, Color c);
     void fill_round_rect(const Rect& r, float radius, Color c);
+    void fill_ellipse(const Rect& box, Color c);
+    // GPU only (when recording()): the processor draws strips, see ui/canvas_ops.cpp.
+    void gradient(const Rect& r, float radius, Color from, Color to, bool vertical);
     void fill_circle(float cx, float cy, float radius, Color c);
     // Copies an XRGB8888 image scaled into `dst` (nearest neighbour; fast
     // enough for full-screen video), clipped. `stride` is in pixels.

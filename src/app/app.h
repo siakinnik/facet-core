@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "core/config.h"
@@ -140,6 +142,8 @@ private:
     std::string skin_key_;        // "module/theme" it was loaded for
     bool skin_changed_ = false;   // the theme has to be applied again
     bool anim_on_ = false;        // moving parts of drawings move
+    uint32_t skin_serial_ = 0;    // counts the themes loaded (part of what a kept layer depends on)
+    std::unordered_map<uint32_t, bool> layer_animated_;  // theme layer id -> it moves
     double frame_t_ = 0;          // when the last frame was drawn
     bool fullscreen_shown_ = false;  // a surface covers the screen this frame
     void draw_skin_screen(bool over);
@@ -167,8 +171,17 @@ private:
     bool debug_input_ = false;  // FACET_DEBUG_INPUT: log every down/up
     // FACET_DEBUG_FRAMES: frames per second and where their time goes, every 5 s.
     bool debug_frames_ = false;
+    double bench_next_ = 0, bench_last_ = 0, bench_max_ = 0;
+    int bench_late_ = 0;
+    double bench_hz_ = 60;
+    // The frame counter in the corner (Settings > Graphics).
+    bool show_fps_ = false;
+    std::deque<double> fps_times_;
+    double fps_draw_ms_ = 0;
+    void draw_fps_counter(double t);
+    bool bench_ = false;  // FACET_BENCH: draw continuously, whatever changed
     int stat_frames_ = 0;
-    double stat_draw_ = 0, stat_present_ = 0, stat_since_ = 0;
+    double stat_draw_ = 0, stat_present_ = 0, stat_since_ = 0, stat_layers_ = 0;
     bool display_on_ = true;
     double last_input_ = 0, last_touch_ = 0, last_activity_sent_ = 0;
 
