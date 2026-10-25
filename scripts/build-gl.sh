@@ -33,6 +33,10 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# The image's own packages (xz-utils, zlib, ...) are older than the archive's current ones, whose
+# sources are all the archive keeps: bring them up to date, so that what is packed below and the
+# source packages fetched at the end are the same versions.
+apt-get -y -qq upgrade
 apt-get install -y -qq --no-install-recommends g++ cmake ninja-build pkg-config git libdrm-dev libgbm-dev \
     libegl-dev libgles-dev libegl1-mesa-dev libgl1-mesa-dri libegl-mesa0 >/dev/null
 
