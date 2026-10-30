@@ -22,6 +22,7 @@ public:
     enum class Mode { Text, Number };
     struct Labels {
         std::string done = "Done", space = "space", symbols = "?123", letters = "ABC";
+        std::string more = "#+=", digits = "123";  // the second symbol layer and back
     };
 
     // Starts a new input session: mode of the field and layout languages
@@ -46,6 +47,7 @@ private:
     std::vector<std::string> langs_{"en"};
     size_t lang_ = 0;
     bool symbols_ = false;
+    int symbol_page_ = 0;  // which symbol layer
     bool shift_ = false;
     Labels labels_;
 };

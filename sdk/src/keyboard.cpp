@@ -55,12 +55,13 @@ void Keyboard::configure(Mode mode, std::vector<std::string> langs) {
     if (!langs.empty()) langs_ = std::move(langs);
     lang_ = 0;
     symbols_ = false;
+    symbol_page_ = 0;
     shift_ = false;
 }
 
 std::vector<std::vector<std::string>> Keyboard::letter_rows() const {
     std::vector<std::vector<std::string>> rows;
-    const char* const* src = symbols_ ? layouts::symbol_rows() : layouts::for_lang(langs_[lang_ % langs_.size()]).rows;
+    const char* const* src = symbols_ ? layouts::symbol_rows(symbol_page_) : layouts::for_lang(langs_[lang_ % langs_.size()]).rows;
     for (int i = 0; i < 3; ++i) rows.push_back(split_utf8(src[i]));
     return rows;
 }
@@ -96,7 +97,8 @@ Canvas Keyboard::build_text(float width, float& height) const {
         float side = kw * 1.5f;
         float total = float(rows[2].size()) * kw + 2 * side + kGap * float(rows[2].size() + 1);
         float x = (width - total) / 2;
-        if (symbols_) c.rrect(x, y, side, kKeyH, kRadius, "track");  // no shift for symbols
+        // No shift for symbols: that key turns to the other symbol layer.
+        if (symbols_) fn_key(c, x, y, side, "page", symbol_page_ == 0 ? labels_.more : labels_.digits);
         else fn_key(c, x, y, side, "shift", {}, "shift", shift_);
         x += side + kGap;
         for (const auto& ch : rows[2]) {
@@ -167,7 +169,10 @@ KeyAction Keyboard::press(const std::string& hit) {
         shift_ = !shift_;
     } else if (hit == "layer") {
         symbols_ = !symbols_;
+        symbol_page_ = 0;
         shift_ = false;
+    } else if (hit == "page") {
+        symbol_page_ = symbol_page_ == 0 ? 1 : 0;
     } else if (hit == "lang") {
         lang_ = (lang_ + 1) % langs_.size();
         shift_ = false;

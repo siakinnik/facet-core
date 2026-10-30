@@ -9,6 +9,8 @@ const Layout kLayouts[] = {
     {"ru", "RU", {"йцукенгшщзхъ", "фывапролджэ", "ячсмитьбюё"}},
 };
 const char* const kSymbols[3] = {"1234567890", "-/:;()&@\"'", ".,?!#%*+="};
+// The rest of what passwords and addresses use; with the first layer every ASCII sign is there.
+const char* const kSymbols2[3] = {"[]{}^~<>|\\", "_$€£¥°§`№", ".,?!'\"-"};
 }  // namespace
 
 const Layout& for_lang(const std::string& lang) {
@@ -17,6 +19,6 @@ const Layout& for_lang(const std::string& lang) {
     return kLayouts[0];
 }
 
-const char* const* symbol_rows() { return kSymbols; }
+const char* const* symbol_rows(int page) { return page == 1 ? kSymbols2 : kSymbols; }
 
 }  // namespace facet::sdk::layouts

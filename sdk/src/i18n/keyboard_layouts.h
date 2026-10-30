@@ -14,7 +14,7 @@ struct Layout {
 
 // Layout for a language code; English if unknown.
 const Layout& for_lang(const std::string& lang);
-// Digits and punctuation layer.
-const char* const* symbol_rows();
+// Symbol layers: 0 digits and punctuation, 1 the remaining signs (brackets, _, $, ...).
+const char* const* symbol_rows(int page = 0);
 
 }  // namespace facet::sdk::layouts

@@ -4,6 +4,8 @@
 // Secure fields (PINs, passwords) always use the built-in keyboard, so a
 // third-party keyboard never learns what is typed into them. Keyboard plugins
 // are never told the contents of any field; they only send the keys they draw.
+#include <algorithm>
+
 #include "app/app.h"
 #include "i18n/i18n.h"
 #include "ui/canvas_ops.h"
@@ -55,7 +57,11 @@ void App::draw_keyboard() {
     if (!kb_.visible || kb_.field != field || kb_.plugin != want) {
         if (kb_.visible && !kb_.plugin.empty() && kb_.plugin != want) host_.keyboard_hide(kb_.plugin);
         auto mode = number ? sdk::Keyboard::Mode::Number : sdk::Keyboard::Mode::Text;
-        builtin_kb_.configure(mode, keyboard_langs());
+        // Passwords and PINs are mostly Latin: a secure field starts with the English layout.
+        std::vector<std::string> langs = keyboard_langs();
+        auto en = std::find(langs.begin(), langs.end(), std::string("en"));
+        if (secure && en != langs.end()) std::rotate(langs.begin(), en, en + 1);
+        builtin_kb_.configure(mode, langs);
         builtin_kb_.set_labels({tr("Done"), tr("space"), "?123", "ABC"});
         if (!want.empty()) host_.keyboard_show(want, number ? "number" : "text", width_dp, keyboard_langs());
         kb_ = {true, field, want, surface_owner};
