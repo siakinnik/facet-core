@@ -36,6 +36,7 @@ void EvdevTouch::open_devices(int screen_w, int screen_h) {
         inv_x_ = s.find("invx") != std::string::npos;
         inv_y_ = s.find("invy") != std::string::npos;
     }
+    debug_ = std::getenv("FACET_DEBUG_INPUT") != nullptr;
     DIR* dir = opendir("/dev/input");
     if (!dir) return;
     while (dirent* e = readdir(dir)) {
@@ -46,6 +47,7 @@ void EvdevTouch::open_devices(int screen_w, int screen_h) {
 
         unsigned long ev[EV_MAX / (sizeof(long) * 8) + 1] = {};
         unsigned long abs[ABS_MAX / (sizeof(long) * 8) + 1] = {};
+        unsigned long keys[KEY_MAX / (sizeof(long) * 8) + 1] = {};
         ioctl(fd, EVIOCGBIT(0, sizeof ev), ev);
         if (!test_bit(ev, EV_ABS)) {
             ::close(fd);
@@ -54,9 +56,25 @@ void EvdevTouch::open_devices(int screen_w, int screen_h) {
         ioctl(fd, EVIOCGBIT(EV_ABS, sizeof abs), abs);
         Device d;
         d.fd = fd;
+        d.name = e->d_name;
         d.mt = test_bit(abs, ABS_MT_POSITION_X);
         int ax = d.mt ? ABS_MT_POSITION_X : ABS_X, ay = d.mt ? ABS_MT_POSITION_Y : ABS_Y;
         if (!test_bit(abs, ax) || !test_bit(abs, ay)) {
+            ::close(fd);
+            continue;
+        }
+        unsigned long props[INPUT_PROP_MAX / (sizeof(long) * 8) + 1] = {};
+        ioctl(fd, EVIOCGPROP(sizeof props), props);
+        char name[128] = "?";
+        ioctl(fd, EVIOCGNAME(sizeof name), name);
+        // Axes alone are not a touch device: accelerometers, light and
+        // proximity sensors and joysticks report ABS_X/Y too, without a touch
+        // button or a pointer property.
+        if (test_bit(ev, EV_KEY)) ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys);
+        bool touch_key = test_bit(ev, EV_KEY) && (test_bit(keys, BTN_TOUCH) || test_bit(keys, BTN_TOOL_FINGER));
+        if (!touch_key && !test_bit(props, INPUT_PROP_DIRECT) && !test_bit(props, INPUT_PROP_POINTER)) {
+            if (debug_ && announced_.insert(path + name).second)
+                log::info("touch: skipping %s (%s): no touch button or pointer property", path.c_str(), name);
             ::close(fd);
             continue;
         }
@@ -67,11 +85,7 @@ void EvdevTouch::open_devices(int screen_w, int screen_h) {
         d.max_x = std::max(ix.maximum, ix.minimum + 1);
         d.min_y = iy.minimum;
         d.max_y = std::max(iy.maximum, iy.minimum + 1);
-        unsigned long props[INPUT_PROP_MAX / (sizeof(long) * 8) + 1] = {};
-        ioctl(fd, EVIOCGPROP(sizeof props), props);
         d.direct = test_bit(props, INPUT_PROP_DIRECT);
-        char name[128] = "?";
-        ioctl(fd, EVIOCGNAME(sizeof name), name);
         if (announced_.insert(path + name).second)
             log::info("touch: %s (%s, %s, %s)", path.c_str(), name, d.mt ? "multitouch" : "single",
                       d.direct ? "touchscreen" : "touchpad");
@@ -105,6 +119,12 @@ Event EvdevTouch::map(const Device& d, EventType type) const {
     return e;
 }
 
+void EvdevTouch::set_proto(Device& d, Proto p) const {
+    if (d.proto == p || !d.mt) return;
+    d.proto = p;
+    if (debug_) log::info("touch: %s uses MT protocol %s", d.name.c_str(), p == Proto::A ? "A" : "B");
+}
+
 void EvdevTouch::read_device(Device& d, std::vector<Event>& out) {
     input_event ev[64];
     while (true) {
@@ -119,14 +139,46 @@ void EvdevTouch::read_device(Device& d, std::vector<Event>& out) {
         for (size_t i = 0; i < size_t(n) / sizeof(input_event); ++i) {
             const input_event& e = ev[i];
             if (e.type == EV_ABS) {
+                if (e.code == ABS_MT_SLOT || e.code == ABS_MT_TRACKING_ID) set_proto(d, Proto::B);
                 if (e.code == ABS_MT_SLOT) d.slot = e.value;
-                if (d.mt && d.slot != 0) continue;
-                if (e.code == ABS_MT_POSITION_X || (!d.mt && e.code == ABS_X)) d.raw_x = e.value, d.moved = true;
-                if (e.code == ABS_MT_POSITION_Y || (!d.mt && e.code == ABS_Y)) d.raw_y = e.value, d.moved = true;
-                if (e.code == ABS_MT_TRACKING_ID) d.down = e.value >= 0;
-            } else if (e.type == EV_KEY && e.code == BTN_TOUCH && !d.mt) {
-                d.down = e.value != 0;
+                if (!d.mt) {
+                    if (e.code == ABS_X) d.raw_x = e.value, d.moved = true;
+                    if (e.code == ABS_Y) d.raw_y = e.value, d.moved = true;
+                } else if (d.proto == Proto::B) {
+                    if (d.slot != 0) continue;
+                    if (e.code == ABS_MT_POSITION_X) d.raw_x = e.value, d.moved = true;
+                    if (e.code == ABS_MT_POSITION_Y) d.raw_y = e.value, d.moved = true;
+                    if (e.code == ABS_MT_TRACKING_ID) d.down = e.value >= 0;
+                } else if (e.code == ABS_MT_POSITION_X || e.code == ABS_MT_POSITION_Y) {
+                    // Protocol A: the first contact of the frame is the finger we follow.
+                    d.contact_pos = d.frame_mt = true;
+                    if (d.contact != 0) continue;
+                    (e.code == ABS_MT_POSITION_X ? d.raw_x : d.raw_y) = e.value;
+                    d.moved = true;
+                }
+            } else if (e.type == EV_KEY && (e.code == BTN_TOUCH || e.code == BTN_TOOL_FINGER)) {
+                if (!d.mt) {
+                    if (e.code == BTN_TOUCH) d.down = e.value != 0;
+                } else {
+                    (e.code == BTN_TOUCH ? d.btn_touch : d.btn_tool) = e.value != 0;
+                    d.btn_known = d.btn_event = true;
+                }
+            } else if (e.type == EV_SYN && e.code == SYN_MT_REPORT) {
+                if (d.proto == Proto::Unknown) set_proto(d, Proto::A);
+                if (d.contact_pos) ++d.contacts;
+                ++d.contact;
+                d.contact_pos = false;
+                d.frame_mt = true;
             } else if (e.type == EV_SYN && e.code == SYN_REPORT) {
+                if (d.mt && d.proto != Proto::B) {
+                    // A frame without any contact is a release, BTN_TOUCH 0 or not
+                    // (some drivers never send it); a released button is one too.
+                    if (d.contact_pos) ++d.contacts;  // the last contact had no SYN_MT_REPORT
+                    if (d.frame_mt || d.btn_event)
+                        d.down = d.contacts > 0 && !(d.btn_known && !d.btn_touch && !d.btn_tool);
+                    d.contact = d.contacts = 0;
+                    d.contact_pos = d.frame_mt = d.btn_event = false;
+                }
                 if (d.down && !d.was_down) out.push_back(map(d, EventType::Down));
                 else if (!d.down && d.was_down) out.push_back(map(d, EventType::Up));
                 else if (d.down && d.moved) out.push_back(map(d, EventType::Move));
