@@ -16,7 +16,9 @@ if(GIT_FOUND)
     execute_process(COMMAND ${GIT_EXECUTABLE} -C ${SRC_DIR} rev-parse --short=12 HEAD
                     OUTPUT_VARIABLE commit OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE rc)
     if(rc EQUAL 0)
-        execute_process(COMMAND ${GIT_EXECUTABLE} -C ${SRC_DIR} status --porcelain
+        # Only changes to tracked files count: untracked ones (downloads and
+        # build output in CI) do not change what is built.
+        execute_process(COMMAND ${GIT_EXECUTABLE} -C ${SRC_DIR} status --porcelain --untracked-files=no
                         OUTPUT_VARIABLE status OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
         if(NOT status STREQUAL "")
             set(dirty 1)

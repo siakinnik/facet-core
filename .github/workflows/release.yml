@@ -118,16 +118,28 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: facet-gl-${{ matrix.arch }}
-          path: gl
+          path: ${{ runner.temp }}/gl
 
       - name: Build static binary
         run: |
-          pkg="$(ls gl/facet-gl-*.tar.gz)"
+          pkg="$(ls "$RUNNER_TEMP"/gl/facet-gl-*.tar.gz)"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFACET_STATIC=ON -DFACET_GPU_HELPER=OFF \
             -DFACET_GL_SHA256="$(sha256sum "$pkg" | cut -c1-64)" -DFACET_GL_SIZE="$(stat -c %s "$pkg")" \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} ${{ matrix.cmake_cross }}
           cmake --build build
           file build/facet
+
+      - name: Check that it is a release build
+        # A dev channel or a star after the commit means the checkout was not
+        # clean when it was built.
+        run: |
+          info="$(${{ matrix.runner }} build/facet --version)"
+          echo "$info"
+          if ! grep -q '^channel: release$' <<<"$info" || grep -q 'uncommitted' <<<"$info"; then
+            echo "::error::The binary is not a release build; changed files in the checkout:"
+            git status --porcelain
+            exit 1
+          fi
 
       - name: Smoke test
         env:
