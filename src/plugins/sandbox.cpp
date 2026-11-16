@@ -3,7 +3,11 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <sched.h>
+#include <sys/socket.h>
 #include <signal.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
@@ -17,11 +21,13 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
 #include "core/config.h"
+#include "core/log.h"
 
 #ifndef SYS_mount_setattr
 #define SYS_mount_setattr 442  // same number on every architecture
@@ -41,6 +47,66 @@ struct MountAttr {
 constexpr uint64_t kAttrRdonly = 0x00000001;
 constexpr uint64_t kAttrNosuid = 0x00000002;
 constexpr unsigned kAtRecursive = 0x8000;
+
+// The system call ABI a seccomp filter checks for; 0 where none is known (no filter).
+#if defined(__x86_64__)
+constexpr uint32_t kAuditArch = AUDIT_ARCH_X86_64;
+#elif defined(__aarch64__)
+constexpr uint32_t kAuditArch = AUDIT_ARCH_AARCH64;
+#elif defined(__arm__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+constexpr uint32_t kAuditArch = AUDIT_ARCH_ARM;
+#elif defined(__i386__)
+constexpr uint32_t kAuditArch = AUDIT_ARCH_I386;
+#elif defined(__riscv) && __riscv_xlen == 64 && defined(AUDIT_ARCH_RISCV64)
+constexpr uint32_t kAuditArch = AUDIT_ARCH_RISCV64;
+#else
+constexpr uint32_t kAuditArch = 0;
+#endif
+
+// Seccomp filters (Linux 3.5+, CONFIG_SECCOMP_FILTER). A null filter is
+// refused with EFAULT where filters exist and EINVAL where they do not.
+bool seccomp_filters() {
+    static const bool ok = kAuditArch != 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, nullptr) != 0 &&
+                           errno == EFAULT;
+    return ok;
+}
+
+// Keeps a process off the network without a network namespace: socket()
+// only for Unix sockets. socketcall() (the old multiplexer) and io_uring
+// (which opens sockets past seccomp) are refused, as are other ABIs.
+bool install_network_filter() {
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    constexpr uint32_t kArg0 = offsetof(seccomp_data, args[0]) + 4;
+#else
+    constexpr uint32_t kArg0 = offsetof(seccomp_data, args[0]);
+#endif
+    sock_filter f[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kAuditArch, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+#if defined(__x86_64__)
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, 0, 1),  // the x32 ABI
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_socketcall
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socketcall, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES),
+#endif
+#ifdef __NR_io_uring_setup
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_setup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS),
+#endif
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, kArg0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES),
+    };
+    sock_fprog prog{static_cast<unsigned short>(sizeof f / sizeof f[0]), f};
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) == 0;
+}
 
 bool has(const std::vector<std::string>& v, const char* s) { return std::find(v.begin(), v.end(), s) != v.end(); }
 
@@ -149,8 +215,9 @@ void run_op(const Op& op) {
             if (mount("proc", dst, "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) fail("proc", dst);
             break;
         case Op::Devpts:
-            if (mount("devpts", dst, "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,ptmxmode=0666,mode=0620") != 0)
-                fail("devpts", dst);
+            // Kernels without private devpts instances (many Android ones)
+            // refuse "newinstance": the plugin then has no terminals, but runs.
+            mount("devpts", dst, "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,ptmxmode=0666,mode=0620");
             break;
         case Op::Symlink:
             if (symlink(op.src.c_str(), dst) != 0 && errno != EEXIST) fail("symlink", dst);
@@ -245,8 +312,10 @@ std::vector<std::string> device_nodes(const std::string& permission) {
 
 void signal_all(pid_t pid, bool sandboxed, int sig) {
     if (pid <= 0) return;
-    if (!sandboxed) {
-        ::kill(-pid, sig);  // the plugin leads its own process group
+    // Without a PID namespace every process shares Facet's: matching it would
+    // signal the whole system. The plugin leads its own process group then.
+    if (!sandboxed || !namespaces().pid) {
+        ::kill(-pid, sig);
         return;
     }
     char want[64] = {};
@@ -326,12 +395,69 @@ std::string detach_devices(pid_t pid, const std::string& permission) {
     });
 }
 
-bool available() {
-    static const bool ok = [] {
-        const char* env = getenv("FACET_SANDBOX");
-        return getuid() == 0 && !(env && std::strcmp(env, "0") == 0);
+std::string Namespaces::missing() const {
+    std::string s;
+    for (auto [name, ok] : {std::pair{"pid", pid}, {"ipc", ipc}, {"uts", uts}, {"net", net}, {"mnt", mnt}})
+        if (!ok) s += (s.empty() ? "" : ", ") + std::string(name);
+    return s;
+}
+
+const Namespaces& namespaces() {
+    static const Namespaces ns = [] {
+        // FACET_SANDBOX_NAMESPACES=mnt,net uses only those (testing what
+        // kernels without the others do, on a kernel that has them).
+        const char* only = getenv("FACET_SANDBOX_NAMESPACES");
+        auto has_ns = [only](const char* name) {
+            if (only && (std::string(",") + only + ",").find(std::string(",") + name + ",") == std::string::npos)
+                return false;
+            return access((std::string("/proc/self/ns/") + name).c_str(), F_OK) == 0;
+        };
+        Namespaces n;
+        n.mnt = has_ns("mnt");
+        n.pid = has_ns("pid");
+        n.ipc = has_ns("ipc");
+        n.uts = has_ns("uts");
+        n.net = has_ns("net");
+        return n;
     }();
-    return ok;
+    return ns;
+}
+
+Mode mode() {
+    static const Mode m = [] {
+        const char* env = getenv("FACET_SANDBOX");
+        if (getuid() != 0 || (env && std::strcmp(env, "0") == 0)) return Mode::Plain;
+        return namespaces().mnt ? Mode::Container : Mode::User;
+    }();
+    return m;
+}
+
+bool available() { return mode() == Mode::Container; }
+
+bool reduced() { return mode() == Mode::User || (mode() == Mode::Container && !namespaces().all()); }
+
+bool can_deny_network() { return namespaces().net || seccomp_filters(); }
+
+std::vector<gid_t> device_groups(const std::vector<std::string>& granted) {
+    std::vector<gid_t> groups;
+    for (const auto& perm : granted)
+        for (const auto& path : device_nodes(perm)) {
+            struct stat st;
+            if (stat(path.c_str(), &st) == 0 && std::find(groups.begin(), groups.end(), st.st_gid) == groups.end())
+                groups.push_back(st.st_gid);
+        }
+    return groups;
+}
+
+void drop_privileges(uid_t uid, const std::vector<gid_t>& groups, bool deny_network) {
+    if (setgroups(groups.size(), groups.data()) != 0) fail("setgroups", nullptr);
+    if (setresgid(uid, uid, uid) != 0) fail("setresgid", nullptr);
+    if (setresuid(uid, uid, uid) != 0) fail("setresuid", nullptr);
+    // A new user clears the parent-death signal: set it again.
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) fail("no_new_privs", nullptr);
+    if (deny_network && !namespaces().net && seccomp_filters() && !install_network_filter())
+        fail("seccomp", nullptr);
 }
 
 std::string prepare(const Spec& spec) {
@@ -457,7 +583,10 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
         ops.push_back({Op::Dir, {}, stage + "/host"});
         ops.push_back({Op::Bind, "/", stage + "/host", true, true});
     } else {
-        ops.push_back({Op::Proc, {}, stage + "/proc"});
+        // Without a PID namespace a new proc shows the host's processes all the
+        // same, and may not be allowed: the host's is bound instead.
+        if (namespaces().pid) ops.push_back({Op::Proc, {}, stage + "/proc"});
+        else ops.push_back({Op::Bind, "/proc", stage + "/proc", false, true});
         if (has(spec.granted, kGpu)) {
             // The GPU drivers find their device (PCI ids, the render node
             // behind a device number) in sysfs; read-only.
@@ -475,14 +604,21 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
     const std::string old_root = stage + "/.oldroot";
     const uid_t id = spec.uid;
 
-    int flags = CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD;
-    if (!network) flags |= CLONE_NEWNET;
+    // Only the namespaces this kernel has: clone() refuses unknown ones (EINVAL).
+    const Namespaces& ns = namespaces();
+    can_deny_network();  // detected here, not in the child
+    int flags = CLONE_NEWNS | SIGCHLD;
+    if (ns.pid) flags |= CLONE_NEWPID;
+    if (ns.ipc) flags |= CLONE_NEWIPC;
+    if (ns.uts) flags |= CLONE_NEWUTS;
+    if (!network && ns.net) flags |= CLONE_NEWNET;
     // fork() semantics (no new stack) with namespaces: the child is PID 1 of its namespace.
     pid_t pid = pid_t(syscall(SYS_clone, flags, nullptr, nullptr, nullptr, nullptr));
     if (pid != 0) return pid;
 
     // ---- child
     prctl(PR_SET_PDEATHSIG, SIGKILL);  // PID 1 of a namespace ignores SIGTERM without a handler
+    if (!ns.pid) setpgid(0, 0);        // signal_all() reaches the plugin by its process group
     dup2(stdin_fd, 0);
     dup2(stdout_fd, 1);
     dup2(stderr_fd, 2);
@@ -496,20 +632,27 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
 
     if (chdir(stage.c_str()) != 0) fail("chdir", stage.c_str());
     if (mkdir(old_root.c_str(), 0700) != 0) fail("mkdir", old_root.c_str());
-    if (syscall(SYS_pivot_root, ".", ".oldroot") != 0) fail("pivot_root", nullptr);
-    if (chdir("/") != 0) fail("chdir", "/");
-    if (umount2("/.oldroot", MNT_DETACH) != 0) fail("detach old root", nullptr);
+    if (syscall(SYS_pivot_root, ".", ".oldroot") == 0) {
+        if (chdir("/") != 0) fail("chdir", "/");
+        if (umount2("/.oldroot", MNT_DETACH) != 0) fail("detach old root", nullptr);
+    } else if (errno == EINVAL) {
+        // The host's root is the initramfs (rootfs), which cannot be pivoted
+        // away: move the new root over it instead, like switch_root does.
+        // Without root privileges (dropped below) there is no way back out.
+        if (mount(".", "/", nullptr, MS_MOVE, nullptr) != 0) fail("move root", nullptr);
+        if (chroot(".") != 0) fail("chroot", nullptr);
+        if (chdir("/") != 0) fail("chdir", "/");
+    } else {
+        fail("pivot_root", nullptr);
+    }
     rmdir("/.oldroot");
     if (mount(nullptr, "/", nullptr, MS_REMOUNT | MS_RDONLY | MS_NOSUID, nullptr) != 0) fail("read-only root", nullptr);
-    if (sethostname("facet", 5) != 0) {
+    if (ns.uts && sethostname("facet", 5) != 0) {
         // Cosmetic only: the plugin works with any host name.
     }
 
     // Drop root for good: own user, only the groups of granted devices.
-    if (setgroups(groups.size(), groups.data()) != 0) fail("setgroups", nullptr);
-    if (setresgid(id, id, id) != 0) fail("setresgid", nullptr);
-    if (setresuid(id, id, id) != 0) fail("setresuid", nullptr);
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) fail("no_new_privs", nullptr);
+    drop_privileges(id, groups, !network);
     if (chdir("/plugin") != 0) fail("chdir", "/plugin");
     execve(argv[0], argv, envp.data());
     fail("exec", argv[0]);

@@ -120,6 +120,7 @@ struct Plugin {
     std::vector<std::string> granted;  // persistent permissions of the running process
     std::vector<std::string> transient;  // transient permissions it holds right now
     bool sandboxed = false;            // the running process is in a container
+    bool own_user = false;             // runs as its own user (in a container or not)
     std::string sdk_reported;          // SDK version from the plugin's hello
 
     // Process + pipes.
@@ -264,8 +265,11 @@ public:
     const std::vector<WaylandClient>& wayland_clients() const { return wayland_clients_; }
     // Enabled plugins that are blocked or failed and need the user.
     int attention_count() const;
-    // Plugins run in containers (Facet runs as root, FACET_SANDBOX != 0).
+    // Plugins run as their own users, in containers where the kernel allows
+    // (Facet runs as root, FACET_SANDBOX != 0): permissions are enforced.
     bool sandbox_active() const;
+    // Why isolation is weaker than a full container on this kernel; empty if it is not.
+    i18n::Text isolation_note() const;
     void restart(const std::string& id, double now);
     void set_visible(const std::string& id, bool visible);
     void send_event(const std::string& id, const std::string& widget, const Json& value,

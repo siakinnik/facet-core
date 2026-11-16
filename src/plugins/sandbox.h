@@ -2,6 +2,9 @@
 // (mount, PID, IPC, UTS and, without the "network" permission, network) as
 // its own unprivileged user, with a minimal root file system that only
 // contains what its granted permissions allow. See docs/ARCHITECTURE.md §3.4.
+// On kernels without some of these namespaces the container uses those that
+// exist; without a mount namespace plugins run as plain processes, each as
+// its own user (see Mode).
 #pragma once
 
 #include <sys/types.h>
@@ -65,9 +68,39 @@ constexpr const char* kProvidesInContainer = "/run/facet/provides";
 constexpr const char* kGlInContainer = "/run/facet/gl";
 constexpr const char* kRequiresInContainer = "/run/facet/requires";
 
-// True when containers can be used: Facet runs as root and FACET_SANDBOX is
-// not "0". Otherwise plugins run as plain processes (development).
+// Namespaces the kernel offers (/proc/self/ns), detected once. Android and
+// old or trimmed-down embedded kernels often have only some, or none.
+struct Namespaces {
+    bool mnt = false, pid = false, ipc = false, uts = false, net = false;
+    bool all() const { return mnt && pid && ipc && uts && net; }
+    std::string missing() const;  // "pid, ipc, uts, net"; empty when all are there
+};
+const Namespaces& namespaces();
+
+// How plugins run:
+//  Container  in their own namespaces (those the kernel has) with a private root;
+//  User       as plain processes, but each as its own user (no mount namespace);
+//  Plain      as Facet's own user: not root or FACET_SANDBOX=0 (development).
+enum class Mode { Plain, User, Container };
+Mode mode();
+// True in Container mode.
 bool available();
+// Container or User mode with less isolation than a full container. Logged once.
+bool reduced();
+
+// Whether a plugin without the "network" permission can be kept off the
+// network: a network namespace, or else a seccomp filter that only allows
+// Unix sockets.
+bool can_deny_network();
+
+// The supplementary groups that give access to the device nodes of the
+// granted permissions (cameras, sound, render nodes).
+std::vector<gid_t> device_groups(const std::vector<std::string>& granted);
+
+// Child side, right after fork() (async-signal-safe): become `uid` with only
+// `groups`, no new privileges and, with `deny_network` (and no network
+// namespace), no sockets other than Unix ones. Exits with kSetupFailed on failure.
+void drop_privileges(uid_t uid, const std::vector<gid_t>& groups, bool deny_network);
 
 // Prepares host-side state (data dir ownership, staging dir). Returns an
 // English error message, empty on success.
@@ -87,7 +120,7 @@ std::string attach_devices(pid_t pid, uid_t uid, const std::string& permission);
 std::string detach_devices(pid_t pid, const std::string& permission);
 
 // Sends `sig` to every process of the plugin: its container (PID namespace
-// of `pid`) or, without containers, its process group.
+// of `pid`) or, without containers or PID namespaces, its process group.
 void signal_all(pid_t pid, bool sandboxed, int sig);
 
 }  // namespace facet::plugins::sandbox

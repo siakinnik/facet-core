@@ -137,7 +137,8 @@ environment covers hardware specifics; with the service, edit
 | `FACET_DATA` | data directory (default `/var/lib/facet`, else `~/.local/share/facet`) |
 | `FACET_PLUGIN_PATH` | extra plugin directories, `:` separated |
 | `FACET_FONT_DIR` | extra font directory |
-| `FACET_DEBUG_INPUT` | log every touch down/up |
+| `FACET_DEBUG_INPUT` | log every touch down/up, the multitouch protocol of each touchscreen and the input devices skipped as not touch (sensors) |
+| `FACET_SANDBOX_NAMESPACES` | testing: use only these namespaces for plugin containers (e.g. `mnt`), as on kernels that lack the others |
 | `FACET_DEBUG_FRAMES` | log frame rate and drawing time every 5 s |
 | `FACET_GPU_OPS` | `0`: with the GPU, draw the interface on the CPU and only compose on the GPU |
 

@@ -20,6 +20,7 @@
 #include <chrono>
 #include <thread>
 
+#include "core/build_info.h"
 #include "core/log.h"
 #include "facet/plugin.h"
 #include "plugins/sandbox.h"
@@ -290,9 +291,25 @@ bool PluginHost::is_enabled(const std::string& id) const {
 }
 
 void PluginHost::start_enabled(double now) {
-    if (!sandbox::available())
+    const auto& ns = sandbox::namespaces();
+    if (sandbox::mode() == sandbox::Mode::Plain) {
         log::warn("plugins: containers unavailable (%s); plugins run as plain processes",
                   getuid() == 0 ? "FACET_SANDBOX=0" : "Facet does not run as root");
+    } else if (sandbox::reduced()) {
+        std::string have;
+        for (auto [name, ok] : {std::pair{"mnt", ns.mnt}, {"pid", ns.pid}, {"ipc", ns.ipc}, {"uts", ns.uts}, {"net", ns.net}})
+            if (ok) have += (have.empty() ? "" : ", ") + std::string(name);
+        log::warn("sandbox: namespaces available: %s (%s missing)", have.empty() ? "none" : have.c_str(),
+                  ns.missing().c_str());
+        if (sandbox::mode() == sandbox::Mode::User)
+            log::warn("sandbox: no mount namespace: plugins run without containers, each as its own user");
+        if (!ns.net)
+            log::warn("sandbox: no network namespace: %s", sandbox::can_deny_network()
+                                                              ? "plugins without the network permission get "
+                                                                "a seccomp filter (Unix sockets only)"
+                                                              : "no seccomp filters either, plugins cannot be "
+                                                                "kept off the network");
+    }
     refresh_blocks(now);
     for (auto& p : plugins_)
         if (is_enabled(p->m.id) && p->block == Block::None) spawn(*p, now);
@@ -376,7 +393,15 @@ int PluginHost::attention_count() const {
     return n;
 }
 
-bool PluginHost::sandbox_active() const { return sandbox::available(); }
+bool PluginHost::sandbox_active() const { return sandbox::mode() != sandbox::Mode::Plain; }
+
+i18n::Text PluginHost::isolation_note() const {
+    if (!sandbox::reduced()) return {};
+    if (sandbox::mode() == sandbox::Mode::User)
+        return {"Isolation is reduced: the kernel has no mount namespaces, so modules run without containers, "
+                "each as its own user.", {}};
+    return {"Isolation is reduced: the kernel lacks these namespaces: {}.", {sandbox::namespaces().missing()}};
+}
 
 uid_t PluginHost::plugin_uid(const std::string& id) {
     constexpr int kFirstUid = 64000;  // above login users, below systemd's dynamic range
@@ -476,10 +501,32 @@ void PluginHost::spawn(Plugin& p, double now) {
     reset_runtime(p);
     p.granted = start_permissions(p);
     p.sandboxed = sandbox::available();
+    p.own_user = sandbox::mode() != sandbox::Mode::Plain;
     p.hidden_since = now;
 
+    // A problem of the kernel, not of the plugin: said once, no restarts.
+    auto refuse = [&](i18n::Text why) {
+        p.state = State::Failed;
+        p.error = Failure{std::move(why)};
+        p.error.gave_up = true;
+        p.retry_at = 0;
+        changed_ = true;
+        log::error("plugins: %s not started: %s", p.m.id.c_str(), describe(p.error).c_str());
+    };
+    // Without a network namespace or seccomp nothing keeps a plugin off the
+    // network: release builds do not start one that has no permission for it.
+    const bool deny_network = !contains(p.granted, sandbox::kNetwork);
+    if (p.own_user && deny_network && !sandbox::can_deny_network()) {
+        if (std::strcmp(build::info().channel, "release") == 0) {
+            refuse("the kernel cannot keep it off the network (no network namespace, no seccomp)");
+            return;
+        }
+        log::warn("plugins: %s: the kernel cannot keep it off the network; started anyway (dev build)",
+                  p.m.id.c_str());
+    }
+
     sandbox::Spec spec;
-    if (p.sandboxed) {
+    if (p.own_user) {
         spec.id = p.m.id;
         spec.plugin_dir = p.m.dir;
         spec.exec = p.m.exec;
@@ -504,7 +551,7 @@ void PluginHost::spawn(Plugin& p, double now) {
     std::string plugin_data = p.sandboxed ? "/data" : data_dir;
     // Shared memory for surfaces: optional, a plugin without it still runs.
     bool surfaces_ok = contains(p.granted, sandbox::kSurface) &&
-                       sandbox::prepare_surface_dir(p.m.id, p.sandboxed ? spec.uid : 0);
+                       sandbox::prepare_surface_dir(p.m.id, p.own_user ? spec.uid : 0);
     if (!surfaces_ok && contains(p.granted, sandbox::kSurface))
         log::warn("plugins: %s: no surface directory", p.m.id.c_str());
     if (p.sandboxed && surfaces_ok) spec.surface_dir = sandbox::surface_dir(p.m.id);
@@ -536,7 +583,7 @@ void PluginHost::spawn(Plugin& p, double now) {
     for (const auto& c : p.m.provides) {
         if (!c.endpoint) continue;
         std::string host = sandbox::endpoint_dir(p.m.id, c.name);
-        if (!sandbox::prepare_endpoint_dir(host, p.sandboxed ? spec.uid : 0)) {
+        if (!sandbox::prepare_endpoint_dir(host, p.own_user ? spec.uid : 0)) {
             log::warn("plugins: %s: no endpoint directory for %s", p.m.id.c_str(), c.name.c_str());
             continue;
         }
@@ -551,7 +598,7 @@ void PluginHost::spawn(Plugin& p, double now) {
             }))
             continue;
         // Owned by the provider: it creates the socket (or whatever it shares) there.
-        uid_t owner = p.sandboxed ? plugin_uid(prov->m.id) : 0;
+        uid_t owner = p.own_user ? plugin_uid(prov->m.id) : 0;
         std::string host = sandbox::endpoint_dir(prov->m.id, need.name, p.m.id);
         if (!sandbox::prepare_endpoint_dir(sandbox::endpoint_dir(prov->m.id, need.name), owner) ||
             !sandbox::prepare_endpoint_dir(host, owner)) {
@@ -581,11 +628,17 @@ void PluginHost::spawn(Plugin& p, double now) {
         pid = sandbox::spawn(spec, in[0], out[1], err[1]);
     } else {
         // Everything the child needs is prepared before fork (no allocation after).
+        // Without containers (no mount namespace) a plugin still runs as its own user.
+        const bool own_user = p.own_user;
+        const uid_t uid = spec.uid;
+        const std::vector<gid_t> groups = own_user ? sandbox::device_groups(p.granted) : std::vector<gid_t>{};
         std::vector<std::string> env_store;
         for (char** e = environ; *e; ++e) {
             if (std::strncmp(*e, "FACET_PLUGIN_", 13) == 0) continue;
+            if (own_user && std::strncmp(*e, "HOME=", 5) == 0) continue;
             env_store.emplace_back(*e);
         }
+        if (own_user) env_store.push_back("HOME=" + data_dir);
         env_store.push_back("FACET_PLUGIN_ID=" + p.m.id);
         env_store.push_back("FACET_PLUGIN_DATA=" + data_dir);
         env_store.push_back("FACET_API=" + std::to_string(sdk::kApiVersion));
@@ -607,14 +660,26 @@ void PluginHost::spawn(Plugin& p, double now) {
             sigemptyset(&none);
             sigprocmask(SIG_SETMASK, &none, nullptr);
             setpgid(0, 0);
-            if (chdir(p.m.dir.c_str()) != 0) _exit(126);
+            if (own_user) sandbox::drop_privileges(uid, groups, deny_network);
+            if (chdir(p.m.dir.c_str()) != 0) {
+                const char msg[] = "facet: cannot enter the module's directory (as its own user it needs "
+                                   "every parent directory to be searchable)\n";
+                (void)!write(2, msg, sizeof msg - 1);
+                _exit(126);
+            }
             execve(argv[0], argv, envp.data());
             _exit(127);
         }
     }
     if (pid < 0) {
+        int e = errno;
         for (int fd : {in[0], in[1], out[0], out[1], err[0], err[1]}) ::close(fd);
-        crash(p, {"fork failed: {}", {std::strerror(errno)}}, now);
+        // clone() refusing namespaces is the kernel's doing: restarting will not help.
+        if (p.sandboxed && (e == EINVAL || e == EPERM)) {
+            refuse({"the kernel does not support module isolation ({})", {std::strerror(e)}});
+            return;
+        }
+        crash(p, {"fork failed: {}", {std::strerror(e)}}, now);
         return;
     }
 
@@ -642,6 +707,8 @@ void PluginHost::spawn(Plugin& p, double now) {
         for (const auto& g : p.granted) perms += (perms.empty() ? "" : ", ") + g;
         log::info("plugins: started %s in a container (pid %d, uid %d, permissions: %s)", p.m.id.c_str(), pid,
                   int(spec.uid), perms.empty() ? "none" : perms.c_str());
+    } else if (p.own_user) {
+        log::info("plugins: started %s without a container (pid %d, uid %d)", p.m.id.c_str(), pid, int(spec.uid));
     } else {
         log::info("plugins: started %s (pid %d)", p.m.id.c_str(), pid);
     }
@@ -773,6 +840,9 @@ void PluginHost::reset_runtime(Plugin& p) {
 void PluginHost::kill_now(Plugin& p) {
     if (p.pid <= 0) return;
     if (p.frozen) sandbox::signal_all(p.pid, p.sandboxed, SIGCONT);
+    // Killing PID 1 of its namespace ends the whole container; without a PID
+    // namespace the plugin's own children are reached through its process group.
+    if (p.own_user && !sandbox::namespaces().pid) ::kill(-p.pid, SIGKILL);
     ::kill(p.pid, SIGKILL);
     int st = 0;
     while (waitpid(p.pid, &st, 0) < 0 && errno == EINTR) {
@@ -839,7 +909,7 @@ void PluginHost::on_exit(Plugin& p, int status, double now) {
         log::info("plugins: %s stopped", p.m.id.c_str());
         return;
     }
-    if (p.sandboxed && WIFEXITED(status) && WEXITSTATUS(status) == sandbox::kSetupFailed)
+    if (p.own_user && WIFEXITED(status) && WEXITSTATUS(status) == sandbox::kSetupFailed)
         crash(p, "could not start its container (details in the log)", now);
     else
         crash(p, "process exited", now);

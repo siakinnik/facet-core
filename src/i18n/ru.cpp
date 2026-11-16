@@ -154,6 +154,15 @@ const i18n::Table& ru() {
         {"Needs “{}”, which no installed module provides.", "Нужен «{}», но ни один установленный модуль его не даёт."},
         {"could not prepare its container", "не удалось подготовить контейнер"},
         {"could not start its container (details in the log)", "не удалось запустить контейнер (подробности в журнале)"},
+        {"the kernel does not support module isolation ({})", "ядро не поддерживает изоляцию модулей ({})"},
+        {"the kernel cannot keep it off the network (no network namespace, no seccomp)",
+         "ядро не может отключить ему сеть (нет сетевого пространства имён и seccomp)"},
+        {"Isolation is reduced: the kernel has no mount namespaces, so modules run without containers, each as "
+         "its own user.",
+         "Изоляция ослаблена: в ядре нет пространств имён монтирования, поэтому модули работают без контейнеров, "
+         "каждый от своего пользователя."},
+        {"Isolation is reduced: the kernel lacks these namespaces: {}.",
+         "Изоляция ослаблена: в ядре нет пространств имён {}."},
         {"Modules need attention: {}", "Модулям нужно внимание: {}"},
         {"Waiting for {}", "Ожидает: {}"},
         {"Theme animation", "Анимация темы"},

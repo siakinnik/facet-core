@@ -585,6 +585,8 @@ void App::draw_apps() {
     if (!host_.sandbox_active())
         ui_.note(tr("Modules run without containers because Facet does not run as root: permissions are shown "
                     "but not enforced."));
+    else if (auto note = host_.isolation_note(); !note.empty())
+        ui_.note(tr(note));
 
     auto background = host_.background_registry();
     if (!background.empty()) {
