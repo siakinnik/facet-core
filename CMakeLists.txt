@@ -36,6 +36,7 @@ add_executable(facet
     src/gpu/sha256.cpp
     src/platform/backlight.cpp
     src/platform/console_log.cpp
+    src/platform/evdev_keys.cpp
     src/platform/evdev_mouse.cpp
     src/ui/skin.cpp
     src/platform/evdev_touch.cpp
@@ -43,6 +44,7 @@ add_executable(facet
     src/platform/gpu.cpp
     src/platform/headless.cpp
     src/platform/platform.cpp
+    src/platform/volume.cpp
     src/plugins/notifications.cpp
     src/plugins/permissions.cpp
     src/plugins/plugin_host.cpp

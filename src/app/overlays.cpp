@@ -98,6 +98,7 @@ void App::draw_overlays(double t) {
     } else if (banner_ && !kb_.visible) {
         draw_banner(t);
     }
+    if (volume_until_ > t && !modal_active(t)) draw_volume_bar(t);
     ui_.end_overlay();
 }
 
@@ -254,6 +255,29 @@ void App::draw_power_dialog() {
         draw_dialog("powergoing", tr("Please wait"), tr("The device is going down…"), {});
         return;
     }
+    if (power_dialog_ == PD::Menu) {
+        std::vector<std::pair<std::string, std::string>> buttons;
+        if (real_display_) {
+            buttons.push_back({"off", tr("Shut down")});
+            buttons.push_back({"reboot", tr("Reboot")});
+        }
+        buttons.push_back({"facet", tr("Restart Facet")});
+        buttons.push_back({"screen", tr("Turn the screen off")});
+        buttons.push_back({"no", tr("Cancel")});
+        std::string c = draw_dialog("powermenu", tr("Power"), {}, buttons);
+        if (c.empty()) return;
+        dirty_ = true;
+        power_dialog_ = PD::None;
+        // The long press and this tap are confirmation enough.
+        if (c == "off" || c == "reboot") power_now(c == "reboot");
+        else if (c == "facet") request_restart();
+        else if (c == "screen") {
+            forced_off_ = true;
+            swallow_ = true;  // the finger that tapped is still on the glass
+            update_display(frame_t_);
+        }
+        return;
+    }
     std::string title, text, yes;
     if (power_dialog_ == PD::Facet) {
         title = tr("Restart Facet?");
@@ -282,6 +306,30 @@ void App::draw_power_dialog() {
     if (c != "yes") return;
     if (chosen == PD::Facet) request_restart();
     else power_now(chosen == PD::Reboot);
+}
+
+// The volume after a volume key: a card at the top with a bar, for a moment.
+void App::draw_volume_bar(double) {
+    const Theme& th = theme_;
+    float W = float(canvas_.width());
+    float w = std::min(W - 2 * th.dp(16), th.dp(420));
+    Rect card{(W - w) / 2, th.dp(12), w, th.dp(64)};
+    canvas_.fill_round_rect(card, th.dp(Theme::kRadius + 6), th.c.surface);
+    Rect inner = card.inset(th.dp(18));
+    if (!volume_.available()) {
+        ui_.text(FontRole::Regular, Theme::kBody, card, tr("no volume control"), th.c.text_dim, Align::Center);
+        return;
+    }
+    float label_w = th.dp(56);
+    Rect bar{inner.x, inner.cy() - th.dp(4), inner.w - label_w, th.dp(8)};
+    canvas_.fill_round_rect(bar, bar.h / 2, th.c.surface_pressed);
+    if (volume_percent_ > 0) {
+        Rect fill = bar;
+        fill.w = std::max(bar.h, bar.w * float(volume_percent_) / 100.f);
+        canvas_.fill_round_rect(fill, bar.h / 2, th.c.accent);
+    }
+    ui_.text(FontRole::Medium, Theme::kBody, {bar.right(), card.y, label_w, card.h},
+             std::to_string(volume_percent_) + "%", th.c.text, Align::End);
 }
 
 // Transient permissions in use: a small icon in the top right corner of

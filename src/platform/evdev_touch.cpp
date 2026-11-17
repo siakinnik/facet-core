@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -86,9 +87,11 @@ void EvdevTouch::open_devices(int screen_w, int screen_h) {
         d.min_y = iy.minimum;
         d.max_y = std::max(iy.maximum, iy.minimum + 1);
         d.direct = test_bit(props, INPUT_PROP_DIRECT);
+        d.vkeys = load_virtual_keys(name);
         if (announced_.insert(path + name).second)
-            log::info("touch: %s (%s, %s, %s)", path.c_str(), name, d.mt ? "multitouch" : "single",
-                      d.direct ? "touchscreen" : "touchpad");
+            log::info("touch: %s (%s, %s, %s%s)", path.c_str(), name, d.mt ? "multitouch" : "single",
+                      d.direct ? "touchscreen" : "touchpad",
+                      d.vkeys.empty() ? "" : (", " + std::to_string(d.vkeys.size()) + " virtual keys").c_str());
         devices_.push_back(d);
     }
     closedir(dir);
@@ -117,6 +120,56 @@ Event EvdevTouch::map(const Device& d, EventType type) const {
     e.x = nx * float(sw_);
     e.y = ny * float(sh_);
     return e;
+}
+
+// Lines or ':'-separated groups of six: 0x01:<key code>:<centre x>:<centre y>:<width>:<height>,
+// in the panel's pixels.
+std::vector<EvdevTouch::VirtualKey> EvdevTouch::load_virtual_keys(const std::string& device_name) const {
+    std::vector<VirtualKey> keys;
+    std::string path = "/sys/board_properties/virtualkeys." + device_name;
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return keys;
+    std::string text;
+    char buf[512];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+    std::fclose(f);
+    for (char& c : text)
+        if (c == '\n' || c == '\r') c = ':';
+    std::vector<long> v;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t end = text.find(':', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string field = text.substr(pos, end - pos);
+        if (!field.empty()) v.push_back(std::strtol(field.c_str(), nullptr, 0));
+        pos = end + 1;
+    }
+    for (size_t i = 0; i + 6 <= v.size(); i += 6) {
+        if (v[i] != 1) continue;
+        Key k = key_from_code(int(v[i + 1]), false);
+        if (k == Key::Unknown) continue;
+        float cx = float(v[i + 2]), cy = float(v[i + 3]), w = float(v[i + 4]), h = float(v[i + 5]);
+        keys.push_back({k, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2});
+        if (debug_)
+            log::info("touch: virtual key %s at %.0f,%.0f %.0fx%.0f", key_name(k), double(cx), double(cy), double(w),
+                      double(h));
+    }
+    return keys;
+}
+
+// Hit test before the screen transform: the boxes are in the panel's own
+// coordinates, where the raw touch range spans the panel.
+Key EvdevTouch::virtual_key_at(const Device& d) const {
+    float x = float(d.raw_x - d.min_x) / float(d.max_x - d.min_x) * float(sw_);
+    float y = float(d.raw_y - d.min_y) / float(d.max_y - d.min_y) * float(sh_);
+    if (swap_) {  // a panel mounted turned: its own width is our height
+        x = float(d.raw_x - d.min_x) / float(d.max_x - d.min_x) * float(sh_);
+        y = float(d.raw_y - d.min_y) / float(d.max_y - d.min_y) * float(sw_);
+    }
+    for (const auto& k : d.vkeys)
+        if (x >= k.x0 && x < k.x1 && y >= k.y0 && y < k.y1) return k.key;
+    return Key::Unknown;
 }
 
 void EvdevTouch::set_proto(Device& d, Proto p) const {
@@ -179,9 +232,19 @@ void EvdevTouch::read_device(Device& d, std::vector<Event>& out) {
                     d.contact = d.contacts = 0;
                     d.contact_pos = d.frame_mt = d.btn_event = false;
                 }
-                if (d.down && !d.was_down) out.push_back(map(d, EventType::Down));
-                else if (!d.down && d.was_down) out.push_back(map(d, EventType::Up));
-                else if (d.down && d.moved) out.push_back(map(d, EventType::Move));
+                if (d.down && !d.was_down) {
+                    d.vkey = d.vkeys.empty() ? Key::Unknown : virtual_key_at(d);
+                    Event k{EventType::KeyDown};
+                    k.key = d.vkey;
+                    out.push_back(d.vkey != Key::Unknown ? k : map(d, EventType::Down));
+                } else if (!d.down && d.was_down) {
+                    Event k{EventType::KeyUp};
+                    k.key = d.vkey;
+                    out.push_back(d.vkey != Key::Unknown ? k : map(d, EventType::Up));
+                    d.vkey = Key::Unknown;
+                } else if (d.down && d.moved && d.vkey == Key::Unknown) {
+                    out.push_back(map(d, EventType::Move));
+                }
                 d.was_down = d.down;
                 d.moved = false;
             }

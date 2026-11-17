@@ -1,5 +1,7 @@
 // Touchscreen input via /dev/input/event* (single-touch and multitouch
-// protocols A and B; only the first contact is tracked).
+// protocols A and B; only the first contact is tracked). Android's virtual
+// keys (/sys/board_properties/virtualkeys.<device name>: Back, Home and Menu
+// drawn under the screen, inside the touch area) become key events.
 #pragma once
 
 #include <set>
@@ -22,6 +24,11 @@ private:
     // Multitouch protocol, told by the events themselves: drivers declare
     // ABS_MT_TRACKING_ID in their capabilities without ever sending it.
     enum class Proto { Unknown, A, B };
+    // A virtual key's hit box, in screen pixels (may lie past the screen's edge).
+    struct VirtualKey {
+        Key key = Key::Unknown;
+        float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    };
     struct Device {
         int fd = -1;
         std::string name;  // event2, for the log
@@ -36,7 +43,11 @@ private:
         int contact = 0, contacts = 0;           // index of the contact being read, contacts with a position
         bool contact_pos = false, frame_mt = false;
         bool btn_touch = false, btn_tool = false, btn_known = false, btn_event = false;
+        std::vector<VirtualKey> vkeys;
+        Key vkey = Key::Unknown;  // the virtual key the finger went down on
     };
+    std::vector<VirtualKey> load_virtual_keys(const std::string& device_name) const;
+    Key virtual_key_at(const Device& d) const;
     void read_device(Device& d, std::vector<Event>& out);
     void set_proto(Device& d, Proto p) const;
     Event map(const Device& d, EventType type) const;

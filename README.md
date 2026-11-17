@@ -137,7 +137,10 @@ environment covers hardware specifics; with the service, edit
 | `FACET_DATA` | data directory (default `/var/lib/facet`, else `~/.local/share/facet`) |
 | `FACET_PLUGIN_PATH` | extra plugin directories, `:` separated |
 | `FACET_FONT_DIR` | extra font directory |
-| `FACET_DEBUG_INPUT` | log every touch down/up, the multitouch protocol of each touchscreen and the input devices skipped as not touch (sensors) |
+| `FACET_DEBUG_INPUT` | log every touch down/up and button press, the multitouch protocol of each touchscreen, its virtual keys and the input devices skipped as not touch (sensors) |
+| `FACET_KEYS` | `off`: leave the hardware buttons (volume, power, Back / Home / Menu) to the system |
+| `FACET_VOLUME_CONTROL` | the ALSA mixer control for the volume, `<name>` or `<card>:<name>` (default: Master, PCM, Speaker, Headphone, then any `... Playback Volume`) |
+| `FACET_DEBUG_AUDIO` | log every mixer control of every sound card (to pick `FACET_VOLUME_CONTROL`) |
 | `FACET_SANDBOX_NAMESPACES` | testing: use only these namespaces for plugin containers (e.g. `mnt`), as on kernels that lack the others |
 | `FACET_DEBUG_FRAMES` | log frame rate and drawing time every 5 s |
 | `FACET_GPU_OPS` | `0`: with the GPU, draw the interface on the CPU and only compose on the GPU |
@@ -147,6 +150,27 @@ Plugins are loaded from `<prefix>/lib/facet/plugins/<id>/`,
 
 For a clean boot without kernel text before the splash, add
 `quiet loglevel=3 vt.global_cursor_default=0` to the kernel command line.
+
+### Hardware buttons
+
+On a device Facet reads the usual Linux key codes from any input device:
+
+| Button | Key code | What it does |
+|---|---|---|
+| Volume up / down | `KEY_VOLUMEUP`, `KEY_VOLUMEDOWN` | system volume in 5 % steps, also with the screen off |
+| Mute | `KEY_MUTE` | mute / back to the last volume |
+| Power | `KEY_POWER` | short: screen off / on (while off, touches and other buttons are ignored); held 0.8 s: power menu |
+| Back | `KEY_BACK` | closes the keyboard, a dialog or a list, else the screen's back arrow |
+| Home | `KEY_HOMEPAGE` (`KEY_HOME` outside keyboards) | the main menu |
+| Menu | `KEY_MENU` (outside keyboards) | Settings |
+| Recent apps | `KEY_APPSELECT` | installed modules |
+
+Touch keys under the screen work either way Android kernels report them: as
+key codes (MediaTek's `mtk-tpd`), or as touches past the screen's edge
+described in `/sys/board_properties/virtualkeys.<touchscreen name>`.
+Devices with only buttons are taken exclusively, so logind does not also
+shut down on the power key; `FACET_KEYS=off` leaves them alone. The
+volume is the sound card's ALSA mixer (Settings > Sound).
 
 ## Troubleshooting
 

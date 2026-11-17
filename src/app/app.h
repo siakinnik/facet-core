@@ -16,8 +16,10 @@
 #include "gfx/canvas.h"
 #include "gfx/recorder.h"
 #include "platform/console_log.h"
+#include "platform/evdev_keys.h"
 #include "platform/evdev_mouse.h"
 #include "platform/platform.h"
+#include "platform/volume.h"
 #include "plugins/plugin_host.h"
 #include "ui/context.h"
 #include "ui/skin.h"
@@ -68,13 +70,27 @@ private:
     void request_restart();
     // Power: restart only Facet, or reboot / shut down the whole device (a
     // dialog asks first). Offered where there is a real display.
-    enum class PowerDialog { None, Facet, Reboot, Off, NotRoot, Going };
+    // Menu: what a long press on the power button opens.
+    enum class PowerDialog { None, Facet, Reboot, Off, NotRoot, Going, Menu };
     PowerDialog power_dialog_ = PowerDialog::None;
     void draw_power_dialog();
     void power_now(bool reboot);
     int power_exit_ = 0;  // LINUX_REBOOT_CMD_* to call when the loop has ended (no init system)
     // A mouse beside the touchscreen (Settings > Input).
     platform::EvdevMouse mouse_;
+    // Hardware buttons (volume, power, Back / Home / Menu) and the volume.
+    platform::EvdevKeys keys_;
+    platform::Volume volume_;
+    int volume_percent_ = 0, volume_before_mute_ = 50;
+    double volume_until_ = 0;   // the volume bar shows until then
+    uint32_t keys_held_ = 0;    // bit per platform::Key: one press from two sources counts once
+    double power_down_at_ = -1;  // the power button is held since then
+    bool power_long_ = false;    // ... long enough for the power menu
+    bool forced_off_ = false;    // the power button turned the screen off: only it turns it on
+    void handle_key(const platform::Event& e, double t);
+    void hardware_back(double t);
+    void change_volume(int percent, double t, bool bar = true);  // bar: show the volume bar
+    void draw_volume_bar(double t);
     bool real_display_ = false;  // fbdev or gpu: a device, not a window
     bool cursor_ = false;        // the pointer is drawn (a mouse moved last)
     void draw_cursor();

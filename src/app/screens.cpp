@@ -413,6 +413,14 @@ void App::draw_settings(double) {
 
     draw_timezone_settings();
 
+    ui_.section(tr("Sound"));
+    if (volume_.available()) {
+        int v = volume_percent_;
+        if (ui_.stepper("volume", tr("Volume"), v, 0, 100, 10, "%")) change_volume(v, 0, false);
+    } else {
+        ui_.info(tr("Volume"), tr("no volume control"), ui::Tone::Dim);
+    }
+
     // Keyboard: built-in or any installed keyboard plugin.
     ui_.section(tr("Input"));
     if (real_display_) {

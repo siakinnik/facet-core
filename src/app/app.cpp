@@ -57,6 +57,9 @@ std::tm local_now() {
     return tm;
 }
 
+constexpr double kPowerHold = 0.8;     // holding the power button this long opens the power menu
+constexpr double kVolumeBar = 1.5;     // the volume bar stays this long after a volume key
+constexpr int kVolumeStep = 5;         // percent per press of a volume key
 constexpr double kTouchHold = 5;       // screen stays on at least this long after a touch
 constexpr double kIdleToMenu = 120;    // sub-screens fall back to the menu
 constexpr double kMinSplash = 1.5;
@@ -320,11 +323,23 @@ int App::run() {
     std::vector<platform::Event> events;
     const bool want_mouse = real_display_ && config_.get_bool("mouse", false);
     mouse_.set_enabled(want_mouse);
+    // Only on the device: a development window must not take the PC's
+    // power button or change its volume.
+    if (real_display_) {
+        keys_.open_devices();
+        if (volume_.open()) {
+            int saved = config_.get_int("volume", -1);
+            if (saved >= 0) volume_.set_percent(saved);
+            volume_percent_ = saved >= 0 ? saved : volume_.get_percent();
+        }
+    }
 
     while (!g_quit) {
         double t = now_s();
         double next = std::min(host_.next_deadline(t), t + 1.0);
         if (banner_) next = std::min(next, banner_until_);
+        if (volume_until_ > 0) next = std::min(next, volume_until_);
+        if (power_down_at_ >= 0 && !power_long_) next = std::min(next, power_down_at_ + kPowerHold);
         std::tm tm = local_now();
         next = std::min(next, t + (60 - tm.tm_sec) + 0.05);  // minute boundary for the clock
         // A dark screen draws nothing: pending redraws wait for it to wake up
@@ -347,6 +362,7 @@ int App::run() {
         fds.clear();
         platform_->add_poll_fds(fds);
         mouse_.add_poll_fds(fds);
+        keys_.add_poll_fds(fds);
         host_.add_poll_fds(fds);
         if (::poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR) {
             log::error("poll: %s", std::strerror(errno));
@@ -356,7 +372,10 @@ int App::run() {
         t = now_s();
         events.clear();
         platform_->pump(events);
-        if (real_display_) mouse_.pump(events, t, canvas_.width(), canvas_.height());
+        if (real_display_) {
+            mouse_.pump(events, t, canvas_.width(), canvas_.height());
+            keys_.pump(events, t);
+        }
         host_.process(t);
         if (host_.take_changed()) dirty_ = true;
         bool surface_frames = host_.take_surface_frames();
@@ -607,6 +626,8 @@ void App::handle_events(const std::vector<platform::Event>& events, double t) {
                 }
                 dirty_ = true;
                 break;
+            case EventType::KeyDown:
+            case EventType::KeyUp: handle_key(e, t); break;
             case EventType::Wheel:
                 last_input_ = t;
                 if (display_on_ && !swallow_) {
@@ -687,6 +708,17 @@ void App::tick(double t) {
         return;
     }
 
+    if (power_down_at_ >= 0 && !power_long_ && t - power_down_at_ >= kPowerHold) {
+        power_long_ = true;  // held: the power menu, on a lit screen
+        forced_off_ = false;
+        last_touch_ = t;
+        if (power_dialog_ == PowerDialog::None) power_dialog_ = PowerDialog::Menu;
+        dirty_ = true;
+    }
+    if (volume_until_ > 0 && t >= volume_until_) {
+        volume_until_ = 0;
+        dirty_ = true;
+    }
     update_gfx_dialog();
     // Settings > Graphics follows the download: progress twice a second, and every change of phase.
     if (view_ == View::Graphics) {
@@ -710,7 +742,10 @@ void App::tick(double t) {
 
 void App::update_display(double t) {
     bool want = true;
-    if (view_ != View::Splash) {
+    if (forced_off_ && host_.notifications().ringing(t)) forced_off_ = false;  // a call lights it up
+    if (forced_off_) {
+        want = false;
+    } else if (view_ != View::Splash) {
         if (auto policy = host_.display_policy(t)) want = *policy;
         if (t - last_touch_ < kTouchHold) want = true;
     }
@@ -719,6 +754,133 @@ void App::update_display(double t) {
     log::info("display: %s", want ? "on" : "off");
     platform_->set_display_power(want);
     if (want) dirty_ = true;
+}
+
+// ------------------------------------------------------------------ buttons
+
+void App::handle_key(const platform::Event& e, double t) {
+    using platform::Key;
+    const uint32_t bit = 1u << unsigned(e.key);
+    const bool down = e.type == platform::EventType::KeyDown;
+    // The same press from two devices (a touch driver that reports its keys
+    // both ways) and the release of a key pressed before we started count once.
+    if (down && !e.repeat) {
+        if (keys_held_ & bit) return;
+        keys_held_ |= bit;
+    } else if (!down) {
+        if (!(keys_held_ & bit)) return;
+        keys_held_ &= ~bit;
+    }
+    if (debug_input_ && !e.repeat) log::info("input: key %s %s", platform::key_name(e.key), down ? "down" : "up");
+
+    // Volume works on a dark screen too (music in the background), held keys repeat.
+    if (e.key == Key::VolumeUp || e.key == Key::VolumeDown) {
+        if (down) change_volume(volume_percent_ + (e.key == Key::VolumeUp ? kVolumeStep : -kVolumeStep), t);
+        return;
+    }
+    if (e.key == Key::Mute) {
+        if (down && !e.repeat) {
+            if (volume_percent_ > 0) {
+                volume_before_mute_ = volume_percent_;
+                change_volume(0, t);
+            } else {
+                change_volume(volume_before_mute_, t);
+            }
+        }
+        return;
+    }
+    if (e.key == Key::Power) {
+        if (view_ == View::Splash) return;
+        if (down && !e.repeat) {
+            power_down_at_ = t;
+            power_long_ = false;
+        } else if (!down && power_down_at_ >= 0) {
+            bool short_press = !power_long_;
+            power_down_at_ = -1;
+            power_long_ = false;
+            if (!short_press) return;  // the menu is open already
+            if (display_on_) {
+                forced_off_ = true;  // also over plugins that keep it on
+                if (pointer_.down) swallow_ = true;  // a finger on the glass now must not click later
+            } else {
+                forced_off_ = false;
+                last_touch_ = t;
+            }
+            last_input_ = t;
+            update_display(t);
+        }
+        return;
+    }
+    if (!down || e.repeat) return;
+    last_input_ = t;
+    // Navigation keys: on a screen the power button turned off they do
+    // nothing (a phone in a pocket); on one that went dark by itself they
+    // only wake it, like a touch.
+    if (forced_off_) return;
+    if (!display_on_) {
+        last_touch_ = t;
+        update_display(t);
+        return;
+    }
+    last_touch_ = t;
+    if (t - last_activity_sent_ > 1) {
+        host_.broadcast_activity();
+        last_activity_sent_ = t;
+    }
+    if (view_ == View::Splash || power_dialog_ == PowerDialog::Going) return;
+    if (e.key == Key::Back) {
+        hardware_back(t);
+        return;
+    }
+    // Home, Menu and recent apps leave whatever is open, except a question
+    // that needs an answer (a permission, a call).
+    if (power_dialog_ != PowerDialog::None) power_dialog_ = PowerDialog::None;
+    if (modal_active(t)) return;
+    if (ui_.has_focus()) ui_.blur();
+    if (kb_.visible) close_keyboard();
+    if (e.key == Key::Home) navigate(View::Menu);
+    else if (e.key == Key::Menu) navigate(View::Settings);
+    else if (e.key == Key::Apps) navigate(View::Apps);
+}
+
+// Back: closes what is on top first (the keyboard, a dialog, a list that
+// popped up), then does what the screen's own back arrow does.
+void App::hardware_back(double t) {
+    dirty_ = true;
+    if (kb_.visible) {
+        if (ui_.has_focus()) ui_.blur();
+        close_keyboard();
+        return;
+    }
+    if (power_dialog_ != PowerDialog::None) {
+        power_dialog_ = PowerDialog::None;
+        return;
+    }
+    if (modal_active(t)) return;
+    if (ui_.press_back()) return;  // closed a popup list
+    if (view_ == View::Menu) {
+        ui_.take_back();
+        return;
+    }
+    if (layers_ && !ops_) platform_->wait_ready(100);
+    run_frame(t);  // the screen's begin_screen() takes the Back
+    if (ui_.take_back()) {  // a screen without a back arrow (a dashboard, a full-screen surface)
+        if (view_ == View::Plugin) leave_plugin();
+        else navigate(View::Menu);
+    }
+}
+
+void App::change_volume(int percent, double t, bool bar) {
+    percent = std::clamp(percent, 0, 100);
+    if (volume_.available()) {
+        volume_.set_percent(percent);
+        volume_percent_ = percent;
+        config_.set("volume", percent);
+    }
+    if (bar && display_on_) {
+        volume_until_ = t + kVolumeBar;
+        dirty_ = true;
+    }
 }
 
 void App::set_language(const std::string& lang, bool remember) {

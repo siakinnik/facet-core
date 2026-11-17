@@ -65,6 +65,15 @@ void Context::end_frame() {
     if (p_.released) active_ = 0;
 }
 
+bool Context::press_back() {
+    if (popup_.open) {
+        popup_.open = false;
+        return true;
+    }
+    back_ = true;
+    return false;
+}
+
 void Context::reset_interaction() {
     active_ = 0;
     drag_ = false;
@@ -200,6 +209,10 @@ HeaderHit Context::begin_screen(std::string_view id, std::string_view title, boo
     if (back) {
         Rect br{gut - t.dp(8), (hh - touch) / 2, touch, touch};
         if (icon_button("__back", br, Icon::Back)) hit = HeaderHit::Back;
+        if (back_) {
+            back_ = false;
+            hit = HeaderHit::Back;
+        }
         x = br.right() + t.dp(4);
     }
     if (action != Icon::None) {

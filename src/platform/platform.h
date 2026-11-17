@@ -12,7 +12,11 @@
 
 namespace facet::platform {
 
-enum class EventType { Down, Up, Move, Resize, Quit, Wheel };
+enum class EventType { Down, Up, Move, Resize, Quit, Wheel, KeyDown, KeyUp };
+
+// Hardware buttons of phones and boards: volume and power on the side, and
+// the Back / Home / Menu row under the screen (keys or touch areas).
+enum class Key { Unknown, VolumeUp, VolumeDown, Mute, Power, Back, Home, Menu, Apps };
 
 struct Event {
     EventType type;
@@ -20,7 +24,15 @@ struct Event {
     int w = 0, h = 0;
     float dy = 0;        // Wheel: notches, > 0 scrolls the content up (reading on)
     bool mouse = false;  // from a mouse, not a finger (shows the pointer)
+    Key key = Key::Unknown;  // KeyDown / KeyUp
+    bool repeat = false;  // KeyDown: the key is held (autorepeat)
 };
+
+// The Key for a Linux input key code (KEY_*), Key::Unknown for others.
+// `keyboard`: the device is a full keyboard, whose Home and Menu keys are
+// for text, not navigation.
+Key key_from_code(int code, bool keyboard);
+const char* key_name(Key k);
 
 // A plugin surface the GPU composes under the canvas (where the canvas is
 // see-through), instead of the core copying its pixels.

@@ -1,7 +1,8 @@
 // Headless backend for automated checks: renders off-screen and replays a
 // script (FACET_SCRIPT file), one command per line:
 //   wait <sec> | tap <x> <y> | down <x> <y> | move <x> <y> | up <x> <y>
-//   shot <file.ppm> | quit
+//   key <name> | keydown <name> | keyup <name> (back, home, menu, apps,
+//   power, volume-up, volume-down, mute) | shot <file.ppm> | quit
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +58,22 @@ public:
             } else if (cmd == "down" || cmd == "move" || cmd == "up") {
                 in >> x >> y;
                 out.push_back({cmd == "down" ? EventType::Down : cmd == "up" ? EventType::Up : EventType::Move, x, y});
+            } else if (cmd == "key" || cmd == "keydown" || cmd == "keyup") {
+                std::string name;
+                in >> name;
+                Key k = Key::Unknown;
+                for (Key c : {Key::VolumeUp, Key::VolumeDown, Key::Mute, Key::Power, Key::Back, Key::Home, Key::Menu,
+                              Key::Apps})
+                    if (name == key_name(c)) k = c;
+                if (k == Key::Unknown) {
+                    log::warn("headless: unknown key %s", name.c_str());
+                    continue;
+                }
+                Event e{EventType::KeyDown};
+                e.key = k;
+                if (cmd != "keyup") out.push_back(e);
+                e.type = EventType::KeyUp;
+                if (cmd != "keydown") out.push_back(e);
             } else if (cmd == "shot") {
                 in >> pending_shot_;
                 flush_shot();  // last presented frame; put a `wait` before it

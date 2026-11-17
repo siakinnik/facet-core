@@ -87,6 +87,15 @@ public:
                 case KeyPress: {
                     KeySym k = XLookupKeysym(&e.xkey, 0);
                     if (k == 'q') out.push_back({EventType::Quit});
+                    // Development stand-ins for a phone's buttons.
+                    Key key = k == XK_Escape ? Key::Back : k == XK_Home ? Key::Home : k == XK_F1 ? Key::Menu : Key::Unknown;
+                    if (key != Key::Unknown) {
+                        Event d{EventType::KeyDown};
+                        d.key = key;
+                        out.push_back(d);
+                        d.type = EventType::KeyUp;
+                        out.push_back(d);
+                    }
                     break;
                 }
                 case ClientMessage:

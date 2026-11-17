@@ -87,6 +87,15 @@ public:
     // A mouse wheel turned by `notches` (> 0: reading on) over (x, y); the
     // scrolling area under the pointer takes it in the next frame.
     void add_wheel(float notches) { wheel_ += notches; }
+    // A hardware Back key: closes an open popup, else the next begin_screen()
+    // with a back button returns HeaderHit::Back. take_back() is true (and
+    // clears it) when no screen took it.
+    bool press_back();  // true: it closed a popup
+    bool take_back() {
+        bool b = back_;
+        back_ = false;
+        return b;
+    }
     void end_frame();
     // True when the UI needs another frame (animation, fling, layout settle).
     bool wants_redraw() const { return redraw_; }
@@ -248,6 +257,7 @@ private:
     std::unordered_map<uint64_t, Pager> pagers_;
     uint64_t pager_ = 0;  // the one being drawn (begin_pages), 0 = none
     float wheel_ = 0;
+    bool back_ = false;  // a hardware Back waits for begin_screen()
     const Skin* skin_ = nullptr;
     std::unordered_map<const Json*, std::shared_ptr<CompiledOps>> compiled_;  // the theme's ops, by list
     uint64_t anim_marks_ = 0;

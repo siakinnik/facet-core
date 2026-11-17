@@ -1,5 +1,7 @@
 #include "platform/platform.h"
 
+#include <linux/input.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +22,36 @@ std::string g_gpu_failure;
 }
 
 const std::string& gpu_failure() { return g_gpu_failure; }
+
+Key key_from_code(int code, bool keyboard) {
+    switch (code) {
+        case KEY_VOLUMEUP: return Key::VolumeUp;
+        case KEY_VOLUMEDOWN: return Key::VolumeDown;
+        case KEY_MUTE: return Key::Mute;
+        case KEY_POWER: return Key::Power;
+        case KEY_BACK: return Key::Back;
+        case KEY_HOMEPAGE: return Key::Home;
+        // Older MediaTek touch keys send KEY_HOME; on a keyboard it moves the cursor.
+        case KEY_HOME: return keyboard ? Key::Unknown : Key::Home;
+        case KEY_MENU: return keyboard ? Key::Unknown : Key::Menu;
+        case KEY_APPSELECT: return Key::Apps;
+        default: return Key::Unknown;
+    }
+}
+
+const char* key_name(Key k) {
+    switch (k) {
+        case Key::VolumeUp: return "volume-up";
+        case Key::VolumeDown: return "volume-down";
+        case Key::Mute: return "mute";
+        case Key::Power: return "power";
+        case Key::Back: return "back";
+        case Key::Home: return "home";
+        case Key::Menu: return "menu";
+        case Key::Apps: return "apps";
+        default: return "none";
+    }
+}
 
 std::unique_ptr<Platform> create_platform(const Options& options) {
     const char* want = std::getenv("FACET_BACKEND");
