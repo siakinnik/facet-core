@@ -2,6 +2,7 @@
 // colour tokens and touch targets (see sdk/include/facet/plugin.h, Canvas).
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -9,6 +10,10 @@
 
 #include "facet/json.h"
 #include "ui/context.h"
+
+namespace facet::gfx {
+struct Image;
+}
 
 namespace facet::ui {
 
@@ -30,6 +35,8 @@ struct OpsEnv {
     const gfx::Color* tone = nullptr;
     bool touch = true;  // false: `hit` is ignored (a theme's drawings take no touches)
     bool skin = false;  // a theme's drawings: time moves in steps (Context::skin_time)
+    // Pictures of `image` ops by their `src` (null: not there, or not loaded yet).
+    std::function<const gfx::Image*(const std::string& src)> image;
 };
 
 // A list of ops in a form that draws without parsing again (themes draw the same list every frame).
@@ -37,6 +44,11 @@ struct CompiledOps;
 std::shared_ptr<CompiledOps> compile_ops(Context& ui, const Json& ops);
 std::string draw_compiled(Context& ui, std::string_view id, const CompiledOps& ops, const gfx::Rect& box,
                           const OpsEnv& env);
+
+// The rectangle {"x", "y", "w", "h"} of `node` inside `box`: numbers in dp,
+// or {"w": a, "h": b, "k": c} = a * box width + b * box height + c dp. A
+// missing w / h is the rest of the box.
+gfx::Rect resolve_rect(Context& ui, const Json& node, const gfx::Rect& box);
 
 // Draws `ops` inside `box` (e.g. a keyboard overlay). Returns the tapped hit id.
 // A number in an op is dp (times `unit`), or an object: {"w": a, "h": b, "k": c}

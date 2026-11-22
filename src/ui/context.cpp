@@ -65,6 +65,12 @@ void Context::end_frame() {
     if (p_.released) active_ = 0;
 }
 
+void Context::stop_scroll() {
+    Scroll& s = scroll_[screen_];
+    s.tracking = false;
+    s.velocity = 0;
+}
+
 bool Context::press_back() {
     if (popup_.open) {
         popup_.open = false;

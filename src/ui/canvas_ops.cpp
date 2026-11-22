@@ -1,5 +1,7 @@
 #include "ui/canvas_ops.h"
 
+#include "gfx/image.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -155,7 +157,7 @@ void draw_rect_glow(gfx::Canvas& cv, Rect r, float radius, float spread, Color c
 
 // ------------------------------------------------------------ compiled ops
 
-enum class Kind : uint8_t { None, Rect, RRect, Circle, Ellipse, Ring, Line, Arc, Poly, Polyline, Grad, Glow, RGlow, Text, Icon };
+enum class Kind : uint8_t { None, Rect, RRect, Circle, Ellipse, Ring, Line, Arc, Poly, Polyline, Grad, Glow, RGlow, Text, Icon, Image };
 enum class WaveKind : uint8_t { None, Sin, Tri, Saw, Pulse, Flicker };
 
 // A number of an op: a plain one, or k + a * width + b * height (+ a wave).
@@ -317,7 +319,7 @@ std::shared_ptr<CompiledOps> compile_ops(Context& ui, const Json& ops_json) {
             {"rect", Kind::Rect},     {"rrect", Kind::RRect}, {"circle", Kind::Circle},     {"ellipse", Kind::Ellipse},
             {"ring", Kind::Ring},     {"line", Kind::Line},   {"arc", Kind::Arc},           {"poly", Kind::Poly},
             {"polyline", Kind::Polyline}, {"grad", Kind::Grad}, {"glow", Kind::Glow},       {"rglow", Kind::RGlow},
-            {"text", Kind::Text},     {"icon", Kind::Icon}};
+            {"text", Kind::Text},     {"icon", Kind::Icon},   {"image", Kind::Image}};
         for (const auto& [name, k] : kKinds)
             if (kind == name) op.kind = k;
         op.x = compile_num(j["x"]), op.y = compile_num(j["y"]), op.w = compile_num(j["w"]), op.h = compile_num(j["h"]);
@@ -337,13 +339,18 @@ std::shared_ptr<CompiledOps> compile_ops(Context& ui, const Json& ops_json) {
         op.to = compile_color(ui, j["to"].str());
         op.hit = j["hit"].str();
         op.text = j["text"].str();
-        op.name = j["name"].str();
+        op.name = op.kind == Kind::Image ? j["src"].str() : j["name"].str();
+        if (op.kind == Kind::Image) op.text = j["fit"].str();
         op.font = font_of(j["font"].str());
         op.align = align_of(j["align"].str());
         op.vertical = j["dir"].str() != "h";
         if (op.kind == Kind::Poly || op.kind == Kind::Polyline) {
             const auto& v = j["pts"].items();
-            for (size_t k = 0; k + 1 < v.size() && op.pts.size() < kMaxPoints * 2; ++k) op.pts.push_back(compile_num(v[k]));
+            // Whole x, y pairs only (the last number was dropped here before, losing a corner).
+            for (size_t k = 0; k + 1 < v.size() && op.pts.size() < kMaxPoints * 2; k += 2) {
+                op.pts.push_back(compile_num(v[k]));
+                op.pts.push_back(compile_num(v[k + 1]));
+            }
         }
         out->ops.push_back(std::move(op));
     }
@@ -395,7 +402,7 @@ std::string draw_compiled(Context& ui, std::string_view id, const CompiledOps& c
 
         // Touch target: shapes with a `hit` id.
         Rect bounds;
-        if (kind == Kind::Rect || kind == Kind::RRect) bounds = {X(op.x), Y(op.y), D(op.w), D(op.h)};
+        if (kind == Kind::Rect || kind == Kind::RRect || kind == Kind::Image) bounds = {X(op.x), Y(op.y), D(op.w), D(op.h)};
         else if (kind == Kind::Circle) {
             float r = D(op.r);
             bounds = {X(op.cx) - r, Y(op.cy) - r, 2 * r, 2 * r};
@@ -481,11 +488,39 @@ std::string draw_compiled(Context& ui, std::string_view id, const CompiledOps& c
                 draw_icon(cv, icon_from_name(op.name), {X(op.x), Y(op.y), s, s}, color);
                 break;
             }
+            case Kind::Image: {
+                const gfx::Image* img = env.image ? env.image(op.name) : nullptr;
+                if (!img || img->w <= 0 || bounds.w < 1 || bounds.h < 1) break;
+                const float a = op.alpha.set ? std::clamp(float(N(op.alpha, 1)), 0.f, 1.f) : 1.f;
+                const float iw = float(img->w), ih = float(img->h);
+                Rect dst = bounds, crop{0, 0, 1, 1};
+                if (op.text == "cover") {  // fills the box; the part that sticks out is cut off
+                    float s = std::max(bounds.w / iw, bounds.h / ih);
+                    float cw = bounds.w / (iw * s), ch = bounds.h / (ih * s);
+                    crop = {(1 - cw) / 2, (1 - ch) / 2, cw, ch};
+                } else if (op.text != "fill") {  // contain: all of it, centred
+                    float s = std::min(bounds.w / iw, bounds.h / ih);
+                    dst = {bounds.cx() - iw * s / 2, bounds.cy() - ih * s / 2, iw * s, ih * s};
+                }
+                cv.draw_image(*img, dst, D(op.r), a, crop);
+                break;
+            }
             default: break;
         }
     }
     cv.pop_clip();
     return tapped;
+}
+
+Rect resolve_rect(Context& ui, const Json& node, const Rect& box) {
+    const Theme& t = ui.theme();
+    Eval N{ui, double(box.w) / double(t.scale), double(box.h) / double(t.scale), ui.time(), false};
+    float x = t.dp(float(N(compile_num(node["x"]))));
+    float y = t.dp(float(N(compile_num(node["y"]))));
+    CNum w = compile_num(node["w"]), h = compile_num(node["h"]);
+    float ww = w.set ? t.dp(float(N(w))) : box.w - x;
+    float hh = h.set ? t.dp(float(N(h))) : box.h - y;
+    return {box.x + x, box.y + y, std::max(0.f, ww), std::max(0.f, hh)};
 }
 
 std::string draw_ops(Context& ui, std::string_view id, const Json& ops_json, const Rect& box, const OpsEnv& env) {

@@ -229,7 +229,8 @@ bool Plugin::holds(const std::string& perm) const {
 
 const SurfaceBuffer* Plugin::surface(const std::string& id) const {
     auto it = surfaces.find(id);
-    return it == surfaces.end() || it->second.current < 0 ? nullptr : &it->second;
+    // A frame in shared memory or in a GPU buffer (apps drawing with the GPU may send no other).
+    return it == surfaces.end() || (it->second.current < 0 && it->second.gpu_current < 0) ? nullptr : &it->second;
 }
 
 bool Manifest::provides_cap(const std::string& cap) const {
@@ -719,6 +720,7 @@ void PluginHost::spawn(Plugin& p, double now) {
     hello["data_dir"] = plugin_data;
     hello["permissions"] = string_array(p.granted);
     hello["surface_dir"] = plugin_surfaces;
+    hello["scale"] = scale_;
     hello["screen"]["w"] = screen_w_;
     hello["screen"]["h"] = screen_h_;
     hello["theme"] = theme_;
@@ -811,7 +813,24 @@ void PluginHost::receive_fds(Plugin& p) {
 }
 
 // Everything a process held ends with it (fail-safe).
+Plugin* PluginHost::system_provider(const std::string& capability, const std::string& permission) {
+    Plugin* best = nullptr;
+    for (auto& p : plugins_)
+        if (const PermissionRequest* r = p->m.permission(permission))
+            if (is_enabled(p->m.id) && p->m.provides_cap(capability) && shown_grant(p->m.id, *r) == Grant::Allow &&
+                (!best || p->m.id < best->m.id))
+                best = p.get();
+    return best;
+}
+
+void PluginHost::send_to(const std::string& id, const Json& msg) {
+    Plugin* p = find(id);
+    if (p && p->state == State::Running) send(*p, msg);
+}
+
 void PluginHost::reset_runtime(Plugin& p) {
+    p.lock_ui = Json();
+    p.shade_ui = Json();
     if (!p.transient.empty() || p.wake_lock || p.subscribed || !p.background_task.empty()) changed_ = true;
     tell_compositor(p, false);
     tell_providers(p, false);
@@ -1054,6 +1073,7 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
     } else if (t == "ui") {
         if (msg["root"].is_object()) {
             p.ui = msg["root"];
+            ++p.ui_gen;
             changed_ = true;
         }
     } else if (t == "tile") {
@@ -1067,6 +1087,7 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
         if (t == "keyboard_ui") {
             if (msg["ops"].is_array()) {
                 p.keyboard_ops = msg["ops"];
+                ++p.ui_gen;
                 p.keyboard_height = std::clamp(float(msg["height"].as_number(0)), 0.f, 1000.f);
                 changed_ = true;
             }
@@ -1143,6 +1164,25 @@ void PluginHost::handle(Plugin& p, const Json& msg, double now) {
             if (wayland_clients_.size() >= 64) break;
             wayland_clients_.push_back({c["module"].str(), c["app_id"].str(), c["title"].str(), c["pid"].as_int(),
                                         c["focused"].as_bool()});
+        }
+        changed_ = true;
+    } else if (t == "lock_ui" || t == "lock_config" || t == "unlock" || t == "lock" || t == "shade_ui" ||
+               t == "shade_action" || t == "rotation") {
+        const bool lock = t.rfind("lock", 0) == 0 || t == "unlock", shade = t.rfind("shade", 0) == 0;
+        const char* perm = lock ? sandbox::kLock : shade ? sandbox::kShade : sandbox::kRotation;
+        const char* cap = lock ? "system.lock" : shade ? "system.shade" : "display.rotation";
+        if (!contains(p.granted, perm) || !p.m.provides_cap(cap)) {
+            log::warn("plugins: %s: %s without providing %s with the %s permission", p.m.id.c_str(), t.c_str(), cap,
+                      perm);
+            return;
+        }
+        if (t == "lock_ui" || t == "shade_ui") {
+            if (msg["root"].is_object()) {
+                (t == "lock_ui" ? p.lock_ui : p.shade_ui) = msg["root"];
+                ++p.ui_gen;
+            }
+        } else {
+            requests_.push_back({p.m.id, t, msg});
         }
         changed_ = true;
     } else if (t == "display") {
@@ -1394,13 +1434,15 @@ void PluginHost::set_content_width(int dp) {
         if (p->state == State::Running) send(*p, msg);
 }
 
-void PluginHost::set_screen_size(int w, int h) {
-    if (w == screen_w_ && h == screen_h_) return;
+void PluginHost::set_screen_size(int w, int h, float scale) {
+    if (w == screen_w_ && h == screen_h_ && scale == scale_) return;
     screen_w_ = w;
     screen_h_ = h;
+    scale_ = scale;
     Json msg = Json::object();
     msg["t"] = "layout";
     msg["content_width"] = content_width_;
+    msg["scale"] = scale;
     msg["screen"]["w"] = w;
     msg["screen"]["h"] = h;
     for (auto& p : plugins_)

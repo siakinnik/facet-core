@@ -195,6 +195,10 @@ dangerous ones shown with a warning (system-wide powers).
 | `wake_lock` | normal | | may keep the screen on |
 | `display.surface` | dangerous | | may show its own pixels (§3.7), also full screen, and get touches and typed text for them |
 | `display.power` | special | | the core accepts `display` requests and sends `activity` |
+| `display.rotation` | normal | | the core accepts `rotation` (§3.10) |
+| `sensors` | dangerous | | motion sensors: IIO nodes (`/dev/iio:device*`), evdev nodes that are accelerometers (absolute X, Y, Z, never a touchscreen, mouse or keyboard), read-only `/sys` |
+| `system.lock` | special | | provides the lock screen (§3.10) |
+| `system.shade` | special | | provides the shade (§3.10): every notification, quick settings |
 | `notifications.distributor` | special | | posts on behalf of other modules / apps, receives copies of all notifications |
 | `wayland.compositor` | special | | runs the Wayland display server for client modules (headless: it shows them through a surface) |
 | `wayland.window` | normal | | client scope: may show windows (enforced by the compositor) |
@@ -276,6 +280,8 @@ Core → plugin:
 | `text` | `action` (`insert`/`backspace`/`enter`/`hide`), `text?` | typed on Facet's keyboard while `text_input` is on |
 | `insets` | `bottom` | pixels of the full-screen surface the keyboard covers now (0 when closed) |
 | `consumer` | `capability`, `module`, `dir?`, `running`, `visible` | providers: a module requiring one of its capabilities started/stopped or opened/closed its screen (§3.9) |
+| `locked` | `value` | lock screen module: the device locked (`true`) or unlocked (§3.10) |
+| `shade_state` | `open`, `notifications`, `wifi`, `brightness`, `volume`, `rotation`, `time` | shade module: what to show; sent when the shade opens, when it changes while open, and `open: false` when it closes (§3.10) |
 | `surface_lent` | `id`, `from`, `available`, `w?`, `h?` | a provider lent this plugin a surface (or took it back) |
 | `shutdown` | — | exit within 2 s |
 
@@ -304,6 +310,12 @@ Plugin → core:
 | `surface_frame` | `id`, `buffer` | show this buffer |
 | `surface_destroy` | `id` | |
 | `text_input` | `active`, `mode` | show / hide Facet's keyboard for the surface |
+| `lock_ui` | `root` | the lock screen's tree (§3.10; `system.lock`) |
+| `lock_config` | `enabled` | a lock is set up: lock at start and when the screen goes off |
+| `unlock` / `lock` | — | the user proved it / lock now |
+| `shade_ui` | `root` | the shade's tree (`system.shade`) |
+| `shade_action` | `action`, `value?` | what the user did in the shade: `open` / `dismiss` (notification key), `clear`, `wifi` (bool), `brightness` / `volume` (0..100), `rotation_auto` (bool), `screen_off`, `settings`, `wifi_settings`, `close` |
+| `rotation` | `value` | turn the picture clockwise by 0, 90, 180 or 270 degrees (`display.rotation`) |
 
 Plugins send already-translated text: they get the language in `hello` and
 `locale`. Unknown fields are ignored, so the protocol grows compatibly.
@@ -430,6 +442,11 @@ use dp relative to its top-left corner and are clipped to it.
 | `glow` | `cx`, `cy`, `r`, `color`: a soft light, brightest at the centre, nothing at `r` |
 | `rglow` | `x`, `y`, `w`, `h`, `r`, `spread`, `color`: a soft light around a rounded rectangle, strongest at its edge |
 
+A canvas with `"drag": true` follows the finger (core 0.9+): a touch that
+starts on it sends `event` with `{"phase": "down" | "move" | "up", "x", "y"}`
+(dp from its top-left corner, at most one move per frame) until it lifts,
+and the screen does not scroll under it (patterns, sliders).
+
 Every op may have `alpha` (0..1). Every number of an op may be an expression
 object instead of dp: `{"w": a, "h": b, "k": c}` is `a` × the canvas' (or box's)
 width + `b` × its height + `c` dp, and `"wave"` (`sin`, `tri`, `saw`, `pulse`,
@@ -477,9 +494,46 @@ Security rules, enforced by the core:
 - If the keyboard plugin is missing, disabled or crashed, the built-in
   keyboard takes over, so text input always works.
 
+### 3.10 System modules: lock screen, shade, rotation
+
+Parts of a phone's system UI are modules, so a device can do without them
+or bring its own. The core keeps the rules; the modules draw and decide only
+what is theirs. Each provides a capability and needs the permission of the
+same name; with several, the first enabled one (by id) is used.
+
+**Lock screen** (`system.lock`). The module says whether a lock is set up
+(`lock_config`); the core remembers it (`lock_required` in the config) and
+locks at start, before the module even runs, and whenever the screen goes
+off, or on `lock`. While locked the core shows only the module's `lock_ui`
+tree (no header, no back): no other screen, no keyboard keys but Facet's
+own for its fields, no banners, permission prompts or indicators, no shade,
+no Home/Back/Menu buttons. Incoming calls and the power menu stay usable.
+Only `unlock` from the module ends it; the secret is checked in the module
+and never reaches the core. The lock fails closed: while the module starts,
+crashes or waits to be restarted the core shows "Locked" with a button to
+restart it. Only a module that is gone (uninstalled) unlocks, with a warning
+in the log.
+
+**Shade** (`system.shade`). A swipe down from the top edge of any screen
+(not over full-screen surfaces, whose edge goes back, nor while locked)
+opens it; it covers the screen above a handle that closes it (tap or swipe
+up), as do Back and Home. The core sends `shade_state` (notifications with a
+`key`, Wi-Fi, brightness, volume, rotation, the time), renders the module's
+`shade_ui` tree and carries out its `shade_action`s; the module never touches
+anything itself.
+
+**Rotation** (`display.rotation`, usually with `sensors`). The module reads
+the accelerometer and sends `rotation`; the core turns the picture when the
+user chose Automatic in Settings > Appearance > Rotation (or in the shade).
+A fixed rotation works without any module. The core draws the turned picture
+into a canvas of the turned size, turns it onto the panel when presenting and
+turns touches back; this works when the processor draws (not with the GPU
+helper yet).
+
 ## 4. Screen power
 
-The core makes the final decision:
+The core makes the final decision (the power button overrides it: a short
+press turns the screen off until it is pressed again):
 
 ```
 on = no running plugin with display.power
@@ -622,6 +676,22 @@ Output backends:
 No dependencies besides libc (and libX11 for the dev window; Mesa only in
 the optional package). Known gap: on the CPU the UI is still redrawn in full
 when it changes; dirty regions are next.
+
+### 8.1 Partial redraw (processor)
+
+When the processor draws, a frame is first only recorded (clear, rectangles,
+rounded rectangles, circles, paths, text, plugin pixels, each with its clip),
+then compared with the last frame on a 32-pixel grid: every tile keeps a hash
+of the commands that touch it, in order. Only tiles whose hash changed are
+drawn, from the commands that touch them, clipped to them, and only their
+rows are compared with and written to the framebuffer. A key press then costs
+the key and the text field instead of the whole screen; an unchanged frame
+costs the recording. Shapes cut by a tile are rasterized as wide as their own
+clip, since coverage adds up along rows. Plugin pixels count as changed every
+frame. Canvas drawings (keyboards, module canvases) are prepared once per
+version of their tree, and keyboard modules do not send a drawing again that
+has not changed. `FACET_FULL_REDRAW=1` turns it off, `FACET_CHECK_PARTIAL=1`
+compares every frame with a full redraw.
 
 ## 9. Not in scope yet
 

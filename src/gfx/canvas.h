@@ -2,6 +2,8 @@
 // vector shapes and text.
 #pragma once
 
+#include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -12,6 +14,7 @@ namespace facet::gfx {
 
 class Font;
 class Recorder;
+struct Image;
 
 enum class Align { Start, Center, End };
 
@@ -55,6 +58,13 @@ public:
     // Copies an XRGB8888 image scaled into `dst` (nearest neighbour; fast
     // enough for full-screen video), clipped. `stride` is in pixels.
     void draw_pixels(const uint32_t* src, int w, int h, int stride, const Rect& dst);
+    // A picture scaled into `dst` (its own aspect ratio is the caller's
+    // business), with its transparency, rounded corners of `radius` and an
+    // overall `alpha`. With the GPU it is drawn opaque, without corners.
+    // `img` must stay alive until the frame is presented.
+    // `crop`: the part of the picture shown, in fractions of its size.
+    void draw_image(const Image& img, const Rect& dst, float radius = 0, float alpha = 1,
+                    const Rect& crop = Rect{0, 0, 1, 1});
     // Recording only: the frame's plugin surface number `layer`, drawn in order.
     void draw_layer(uint32_t layer);
 
@@ -64,7 +74,51 @@ public:
     void draw_text_in(Font& font, int px, const Rect& box, std::string_view text, Color c,
                       Align align = Align::Start);
 
+    // ---- Partial redraw (processor drawing, slow devices). Between
+    // begin_frame() and end_frame() drawing is only recorded; end_frame()
+    // compares it with the last frame on a grid of tiles and draws just the
+    // tiles whose drawing changed, so a key press costs the key, not the
+    // screen. take_damage() is every area drawn since it was last called
+    // (what the screen has to be sent).
+    void set_partial(bool on);
+    bool partial() const { return partial_; }
+    void begin_frame();
+    void end_frame();
+    void invalidate() { full_ = true; }  // the next end_frame() draws everything
+    std::vector<Rect> take_damage();
+    struct FrameStats {
+        size_t commands = 0;
+        double area = 0;  // share of the canvas drawn, 0..1
+        size_t mismatched = 0;  // FACET_CHECK_PARTIAL: pixels unlike a full redraw
+    };
+    const FrameStats& frame_stats() const { return stats_; }
+
 private:
+    enum class CmdKind : uint8_t { Clear, Rect, Path, Pixels, Text, RoundRect, Circle, Image };
+    struct Cmd {
+        explicit Cmd(CmdKind k) : kind(k) {}
+        CmdKind kind;
+        Rect clip, bounds;
+        Color c;
+        uint64_t hash = 0;
+        Rect r;              // Rect, Pixels (destination)
+        uint32_t index = 0;  // Path: into paths_; Text: offset into text_
+        uint32_t len = 0;    // Text: bytes
+        Font* font = nullptr;
+        int px = 0;
+        float x = 0, y = 0;  // Text: pen and baseline; Circle: centre
+        float radius = 0;    // RoundRect, Circle, Image
+        float alpha = 1;     // Image
+        Rect crop{0, 0, 1, 1};
+        const Image* image = nullptr;
+        const uint32_t* src = nullptr;
+        int w = 0, h = 0, stride = 0;
+    };
+    void record(Cmd& c);
+    void replay(const Cmd& c);
+    void clear_now(Color c);
+    void draw_image_now(const Image& img, const Rect& dst, float radius, float alpha, const Rect& crop);
+
     void blend(int x, int y, Color c, float coverage);
     // Pixels [x0, x1) of row y with one coverage: a copy when opaque.
     void blend_span(int x0, int x1, int y, Color c, float coverage);
@@ -76,6 +130,18 @@ private:
     std::vector<Rect> clip_stack_;
     Rasterizer raster_;
     Recorder* rec_ = nullptr;
+
+    bool partial_ = false, deferring_ = false, full_ = true;
+    bool replaying_ = false;  // drawing a tile: clip_ is the tile part of replay_clip_
+    Rect replay_clip_;
+    std::vector<Cmd> cmds_;
+    std::vector<Path> paths_;
+    size_t paths_used_ = 0;
+    std::string text_;
+    std::vector<uint64_t> tiles_, prev_tiles_;
+    std::vector<Rect> damage_;  // since take_damage()
+    uint64_t serial_ = 0;       // frames: pixels from elsewhere count as changed every frame
+    FrameStats stats_;
 };
 
 }  // namespace facet::gfx

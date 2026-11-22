@@ -29,6 +29,10 @@ constexpr const char* kBackground = "background";
 constexpr const char* kWakeLock = "wake_lock";
 constexpr const char* kCompositor = "wayland.compositor";
 constexpr const char* kSurface = "display.surface";
+constexpr const char* kSensors = "sensors";
+constexpr const char* kRotation = "display.rotation";
+constexpr const char* kLock = "system.lock";
+constexpr const char* kShade = "system.shade";
 
 // Host device nodes a permission gives access to (camera: /dev/video*, ...).
 std::vector<std::string> device_nodes(const std::string& permission);

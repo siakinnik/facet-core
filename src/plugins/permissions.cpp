@@ -23,6 +23,15 @@ const std::vector<PermissionInfo>& all_permissions() {
          "Show its own picture (video, apps) and get touches and typed text for it, also over the whole "
          "screen. Facet keeps the top edge: swipe down from it to go back."},
         {"display.power", Level::Special, false, "Screen power", "Turn the screen on and off."},
+        {"display.rotation", Level::Normal, false, "Screen rotation", "Turn the picture to match how the device is held."},
+        {"sensors", Level::Dangerous, false, "Motion sensors",
+         "Read the accelerometer and similar sensors. Their readings can give away how the device is held and "
+         "tapped."},
+        {"system.lock", Level::Special, false, "Lock screen",
+         "Show the lock screen and decide when the device unlocks. Until it does, nothing else can be used."},
+        {"system.shade", Level::Special, false, "Notification shade",
+         "Show the panel pulled down from the top edge: every notification and the quick settings (Wi-Fi, "
+         "brightness, volume), and act on them."},
         {"notifications.distributor", Level::Special, false, "Notification distributor",
          "Post notifications on behalf of other modules and apps, and see every notification of the system."},
         {"wayland.compositor", Level::Special, false, "Display server",

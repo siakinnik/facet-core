@@ -153,6 +153,8 @@ const char* App::view_name(View v) {
         case View::Apps: return "apps";
         case View::AppInfo: return "appinfo";
         case View::Notifications: return "notifications";
+        case View::Wifi: return "wifi";
+        case View::WifiJoin: return "wifi-join";
     }
     return "";
 }
@@ -231,7 +233,7 @@ void App::update_theme(bool force) {
         if (skin_) skin_->apply(theme_.c);
         host_.set_theme(dark ? "dark" : "light");
         host_.set_content_width(int(ui::Context::content_width_dp(theme_, float(canvas_.width()))));
-        host_.set_screen_size(canvas_.width(), canvas_.height());
+        host_.set_screen_size(canvas_.width(), canvas_.height(), theme_.scale);
         dirty_ = true;
     }
 }
@@ -270,6 +272,9 @@ bool App::init() {
     else
         canvas_.resize(platform_->width(), platform_->height());
     layers_ = platform_->supports_layers();
+    // The processor draws: only what changed is drawn and sent to the screen
+    // (FACET_FULL_REDRAW=1 draws every frame whole, to compare).
+    canvas_.set_partial(!layers_ && !ops_ && !std::getenv("FACET_FULL_REDRAW"));
     host_.set_gpu_layers(layers_);
     if (ops_ && platform_->supports_gpu_buffers()) {
         // Plugins may hand the GPU their GPU-drawn frames (Wayland apps).
@@ -303,6 +308,10 @@ bool App::init() {
     skin_key_ = "?";  // the modules are known now: load the chosen theme pack again
     update_theme(true);
     host_.start_enabled(t);
+    // A lock is set up: locked from the start, before its module even runs.
+    if (lock_required()) set_locked(true);
+    panel_w_ = canvas_.width(), panel_h_ = canvas_.height();
+    apply_rotation();  // a fixed rotation from Settings
     boot_stage_ = 1;
     boot_thread_ = std::thread(wait_for_system, std::ref(system_ready_), std::ref(stop_));
     log::info("facet: %s backend, %dx%d, data in %s", platform_->name(), canvas_.width(), canvas_.height(),
@@ -323,6 +332,11 @@ int App::run() {
     std::vector<platform::Event> events;
     const bool want_mouse = real_display_ && config_.get_bool("mouse", false);
     mouse_.set_enabled(want_mouse);
+    // Wi-Fi: not in automated tests (they must not touch the machine's network).
+    if (std::strcmp(platform_->name(), "headless") != 0 || std::getenv("FACET_WPA_CTRL")) {
+        wifi_.start(config_.get("wifi_networks"));
+        wifi_started_ = true;
+    }
     // Only on the device: a development window must not take the PC's
     // power button or change its volume.
     if (real_display_) {
@@ -363,6 +377,8 @@ int App::run() {
         platform_->add_poll_fds(fds);
         mouse_.add_poll_fds(fds);
         keys_.add_poll_fds(fds);
+        if (wifi_started_ && wifi_.wake_fd() >= 0) fds.push_back({wifi_.wake_fd(), POLLIN, 0});
+        if (images_.wake_fd() >= 0) fds.push_back({images_.wake_fd(), POLLIN, 0});
         host_.add_poll_fds(fds);
         if (::poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR) {
             log::error("poll: %s", std::strerror(errno));
@@ -378,6 +394,14 @@ int App::run() {
         }
         host_.process(t);
         if (host_.take_changed()) dirty_ = true;
+        handle_system_requests(t);
+        if (images_.take_ready()) dirty_ = true;  // pictures decoded: show them
+        images_.trim(t);
+        if (wifi_started_) {
+            if (wifi_.take_changed() && (view_ == View::Wifi || view_ == View::WifiJoin || view_ == View::Settings))
+                dirty_ = true;
+            if (auto saved = wifi_.take_saved()) config_.set("wifi_networks", *saved);
+        }
         bool surface_frames = host_.take_surface_frames();
         // Surfaces over the video memory limit are part of the canvas: their frames redraw it.
         if (surface_frames && cpu_surface_frames_) dirty_ = true;
@@ -387,7 +411,10 @@ int App::run() {
         tick(t);
         double t0 = debug_frames_ ? now_s() : 0;
         const bool anim_due = moving && t - frame_t_ >= 1.0 / 15 - 0.002;
-        if ((dirty_ || ui_.wants_redraw() || anim_due) && display_on_ && platform_->ready_to_draw() &&
+        // A frame a touch just drew is shown first; the next one waits for
+        // the next turn of the loop (it comes at once). On a slow device
+        // this halves the time from a tap to its answer on the screen.
+        if (!drew_ && (dirty_ || ui_.wants_redraw() || anim_due) && display_on_ && platform_->ready_to_draw() &&
             !(bench_ && t < bench_next_)) {
             if (bench_) {
                 // Late = a frame that did not follow the last one within 1.5 refresh periods.
@@ -417,6 +444,15 @@ int App::run() {
                           bench_ ? (" | late " + std::to_string(bench_late_) + ", longest gap " +
                                     std::to_string(int(bench_max_ * 1000)) + " ms").c_str()
                                  : "");
+            if (stat_rf_count_ > 0)
+                log::info("frames: %d drawn in 5 s (also those for touches), %.1f ms each, at most %.1f ms%s",
+                          stat_rf_count_, stat_rf_ms_ / stat_rf_count_, stat_rf_max_,
+                          canvas_.partial() ? (", " + std::to_string(int(stat_area_ * 100 / stat_rf_count_)) +
+                                               "% of the screen redrawn on average")
+                                                  .c_str()
+                                            : "");
+            stat_rf_count_ = 0;
+            stat_rf_ms_ = stat_rf_max_ = stat_area_ = 0;
             bench_late_ = 0;
             stat_layers_ = 0;
             if (ops_) {
@@ -501,9 +537,40 @@ uint64_t App::vram_base() const {
     return screen * 4;
 }
 
+// The canvas turned clockwise by `deg` into `dst` (the panel's size), in
+// blocks that stay in the cache.
+static void rotate_into(const gfx::Canvas& src, gfx::Canvas& dst, int deg) {
+    const int sw = src.width(), sh = src.height(), dw = dst.width(), dh = dst.height();
+    const uint32_t* s = src.pixels();
+    uint32_t* d = dst.pixels();
+    constexpr int B = 32;
+    for (int by = 0; by < sh; by += B)
+        for (int bx = 0; bx < sw; bx += B) {
+            const int ey = std::min(by + B, sh), ex = std::min(bx + B, sw);
+            for (int y = by; y < ey; ++y) {
+                const uint32_t* row = s + size_t(y) * size_t(sw);
+                for (int x = bx; x < ex; ++x) {
+                    int px, py;
+                    if (deg == 90) px = dw - 1 - y, py = x;
+                    else if (deg == 180) px = dw - 1 - x, py = dh - 1 - y;
+                    else px = y, py = dh - 1 - x;
+                    d[size_t(py) * size_t(dw) + size_t(px)] = row[x];
+                }
+            }
+        }
+}
+
 void App::present_frame(bool canvas_changed) {
     if (!layers_) {
-        platform_->present(canvas_);
+        std::vector<gfx::Rect> damage = canvas_.take_damage();
+        if (rotation_ != 0 && rotated_.width() > 0) {
+            rotate_into(canvas_, rotated_, rotation_);
+            platform_->present(rotated_);
+        } else if (canvas_.partial()) {
+            if (!damage.empty()) platform_->present_damage(canvas_, damage);
+        } else {
+            platform_->present(canvas_);
+        }
         return;
     }
     std::vector<platform::Layer> layers;
@@ -578,6 +645,8 @@ void App::run_frame(double t) {
     if (ops_) rec_.begin_frame(platform_->take_ops_lost());
     moved_ = false;
     update_theme(false);
+    frame_images_.clear();  // the last frame is shown: its pictures may go
+    canvas_.begin_frame();
     ui_.begin_frame(canvas_, theme_, pointer_, t);
     ui_.set_overlay(kb_rect_);  // keyboard area of the previous frame
     prepare_overlays(t);        // dialogs, calls and banners take precedence
@@ -587,7 +656,11 @@ void App::run_frame(double t) {
     ui_.set_skin(skin_.get());
     ui_.set_animations(anim_on_);
     draw_skin_screen(false);
-    switch (view_) {
+    if (locked_ && view_ != View::Splash) {
+        draw_lock();
+    } else if (shade_open_) {
+        draw_shade(t);
+    } else switch (view_) {
         case View::Splash: draw_splash(); break;
         case View::Menu: draw_menu(); break;
         case View::Dashboard: draw_dashboard(); break;
@@ -597,6 +670,8 @@ void App::run_frame(double t) {
         case View::Apps: draw_apps(); break;
         case View::AppInfo: draw_app_info(t); break;
         case View::Notifications: draw_notifications(t); break;
+        case View::Wifi: draw_wifi(t); break;
+        case View::WifiJoin: draw_wifi_join(); break;
     }
     if (!fullscreen_shown_) draw_skin_screen(true);
     draw_keyboard();
@@ -604,7 +679,14 @@ void App::run_frame(double t) {
     if (cursor_ && mouse_.enabled()) draw_cursor();
     if (show_fps_) draw_fps_counter(t);
     ui_.end_frame();
+    canvas_.end_frame();  // partial redraw: the tiles that changed
     fps_draw_ms_ = (now_s() - frame_start) * 1000;
+    if (debug_frames_) {
+        ++stat_rf_count_;
+        stat_rf_ms_ += fps_draw_ms_;
+        stat_rf_max_ = std::max(stat_rf_max_, fps_draw_ms_);
+        stat_area_ += canvas_.frame_stats().area;
+    }
     // Keys of the built-in keyboard reach the field on the next frame.
     for (auto& [action, text] : kb_pending_) apply_key(action, text);
     if (!kb_pending_.empty()) dirty_ = true;
@@ -620,14 +702,23 @@ void App::handle_events(const std::vector<platform::Event>& events, double t) {
         switch (e.type) {
             case EventType::Quit: g_quit = 1; break;
             case EventType::Resize:
-                if (e.w > 0 && (e.w != canvas_.width() || e.h != canvas_.height())) {
-                    canvas_.resize(e.w, e.h);
+                canvas_.invalidate();  // a new or reopened screen: everything is drawn again
+                if (e.w > 0 && (e.w != panel_w_ || e.h != panel_h_)) {
+                    panel_w_ = e.w, panel_h_ = e.h;
+                    bool turned = rotation_ == 90 || rotation_ == 270;
+                    canvas_.resize(turned ? e.h : e.w, turned ? e.w : e.h);
+                    if (rotation_ != 0) rotated_.resize(e.w, e.h);
                     update_theme(true);
                 }
                 dirty_ = true;
                 break;
             case EventType::KeyDown:
             case EventType::KeyUp: handle_key(e, t); break;
+            case EventType::Text:  // typed text (tests): as from the keyboard
+                if (e.text == "\n") kb_pending_.emplace_back("enter", "");
+                else kb_pending_.emplace_back("insert", e.text);
+                dirty_ = true;
+                break;
             case EventType::Wheel:
                 last_input_ = t;
                 if (display_on_ && !swallow_) {
@@ -640,6 +731,8 @@ void App::handle_events(const std::vector<platform::Event>& events, double t) {
             case EventType::Down:
             case EventType::Up:
             case EventType::Move: {
+                platform::Event ev = e;
+                if (!e.mouse && rotation_ != 0) to_logical(ev.x, ev.y);  // a mouse moves in the picture already
                 if (e.mouse != cursor_ && (e.mouse || e.type == EventType::Down)) {
                     cursor_ = e.mouse;  // the last one to touch decides
                     dirty_ = true;
@@ -664,8 +757,26 @@ void App::handle_events(const std::vector<platform::Event>& events, double t) {
                     if (e.type == EventType::Up) swallow_ = false;
                     break;
                 }
-                pointer_.x = e.x;
-                pointer_.y = e.y;
+                // Pulled down from the top edge: the shade, when a shade module runs.
+                if (!shade_open_ && !locked_ && view_ != View::Splash && !fullscreen_shown_ && !modal_active(t)) {
+                    if (e.type == EventType::Down) {
+                        shade_pull_ = {ev.y < theme_.dp(24), ev.y};
+                    } else if (e.type == EventType::Move && shade_pull_.active &&
+                               ev.y - shade_pull_.start_y > theme_.dp(56)) {
+                        plugins::Plugin* sp = host_.system_provider("system.shade", "system.shade");
+                        shade_pull_ = {};
+                        if (sp && sp->state == plugins::State::Running) {
+                            pointer_.down = false;
+                            open_shade(true);
+                            swallow_ = true;  // the rest of this touch
+                            break;
+                        }
+                    } else if (e.type == EventType::Up) {
+                        shade_pull_ = {};
+                    }
+                }
+                pointer_.x = ev.x;
+                pointer_.y = ev.y;
                 // These frames cannot wait for the loop; drawn into memory the
                 // GPU reads, they wait for it to finish the last one.
                 if (layers_ && !ops_ && (e.type == EventType::Down || e.type == EventType::Up))
@@ -729,8 +840,12 @@ void App::tick(double t) {
             dirty_ = true;
         }
     }
+    if (view_ == View::Wifi && display_on_ && t - wifi_scan_at_ > 15) {  // the list stays current while open
+        wifi_scan_at_ = t;
+        wifi_.scan();
+    }
     if ((view_ == View::Settings || view_ == View::Graphics || view_ == View::Plugin || view_ == View::Apps ||
-         view_ == View::AppInfo || view_ == View::Notifications) &&
+         view_ == View::AppInfo || view_ == View::Notifications || view_ == View::Wifi || view_ == View::WifiJoin) &&
         t - last_input_ > kIdleToMenu && !modal_active(t) &&
         !(view_ == View::Plugin && host_.holds_wake_lock(plugin_id_)))  // watching something
         navigate(View::Menu);
@@ -752,6 +867,8 @@ void App::update_display(double t) {
     if (want == display_on_) return;
     display_on_ = want;
     log::info("display: %s", want ? "on" : "off");
+    if (!want && lock_required()) set_locked(true);  // whoever turns it on finds it locked
+    if (!want) open_shade(false);
     platform_->set_display_power(want);
     if (want) dirty_ = true;
 }
@@ -828,6 +945,13 @@ void App::handle_key(const platform::Event& e, double t) {
         last_activity_sent_ = t;
     }
     if (view_ == View::Splash || power_dialog_ == PowerDialog::Going) return;
+    if (locked_) return;  // the lock screen has no way out but its own
+    if (shade_open_ && (e.key == Key::Back || e.key == Key::Home)) {
+        open_shade(false);
+        if (e.key == Key::Home) navigate(View::Menu);
+        return;
+    }
+    if (shade_open_) open_shade(false);
     if (e.key == Key::Back) {
         hardware_back(t);
         return;
@@ -909,12 +1033,20 @@ void App::leave_plugin() {
     navigate(back, back == View::AppInfo ? plugin_id_ : std::string());
 }
 
+void App::wipe_wifi_password() {
+    std::fill(wifi_password_.begin(), wifi_password_.end(), '\0');
+    wifi_password_.clear();
+}
+
 void App::navigate(View v, const std::string& plugin_id) {
+    if (view_ == View::WifiJoin && v != View::WifiJoin) wipe_wifi_password();
+    if (v == View::Wifi && view_ != View::Wifi && view_ != View::WifiJoin) wifi_scan_at_ = 0;  // scan on opening
     if (view_ == View::Plugin && (v != View::Plugin || plugin_id != plugin_id_)) host_.set_visible(plugin_id_, false);
     view_ = v;
     plugin_id_ = plugin_id;
     if (v == View::Plugin) host_.set_visible(plugin_id, true);
     plugin_back_ = View::Menu;
+    canvas_drag_ = {};
     ui_.reset_interaction();
     ip_cache_.clear();
     tz_region_pending_.reset();

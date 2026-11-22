@@ -16,7 +16,13 @@ takes the panel down.
 - On-screen keyboard as a replaceable plugin (EN/RU, symbols, numeric pad);
   secure fields (PINs, passwords) always use the core's built-in keyboard.
 - Status bar with the network state (Wi-Fi with signal and SSID via nl80211,
-  Ethernet, offline), read without root.
+  Ethernet, offline), read without root; Wi-Fi networks are found, joined and
+  forgotten in Settings > Network > Wi-Fi (NetworkManager or wpa_supplicant).
+- Phone hardware: volume and power buttons, the Back / Home / Menu row, screen
+  rotation (fixed, or following a rotation module), and system UI as modules:
+  a [lock screen](https://github.com/siakinnik/facet-lockscreen) (PIN, password,
+  pattern), a [notification shade](https://github.com/siakinnik/facet-shade) and
+  [auto-rotation](https://github.com/siakinnik/facet-rotation).
 - Every build knows what it is: version, `dev`/`release` channel, git commit
   and repository, shown on the splash, the menu and in Settings, and by
   `facet --version`.
@@ -73,6 +79,9 @@ Available plugins:
 |---|---|
 | [facet-display-power](https://github.com/siakinnik/facet-display-power) | screen on/off by schedule, touch and camera presence |
 | [facet-sysmon](https://github.com/siakinnik/facet-sysmon) | CPU, memory, temperatures, disks, network, top processes |
+| [facet-lockscreen](https://github.com/siakinnik/facet-lockscreen) | lock screen: PIN, password or pattern |
+| [facet-shade](https://github.com/siakinnik/facet-shade) | notification shade with quick settings |
+| [facet-rotation](https://github.com/siakinnik/facet-rotation) | turns the screen with the accelerometer |
 | [facet-telegram-dm-notif](https://github.com/siakinnik/facet-telegram-dm-notif) | unread messages from private Telegram chats (read only) |
 -->
 
@@ -141,8 +150,11 @@ environment covers hardware specifics; with the service, edit
 | `FACET_KEYS` | `off`: leave the hardware buttons (volume, power, Back / Home / Menu) to the system |
 | `FACET_VOLUME_CONTROL` | the ALSA mixer control for the volume, `<name>` or `<card>:<name>` (default: Master, PCM, Speaker, Headphone, then any `... Playback Volume`) |
 | `FACET_DEBUG_AUDIO` | log every mixer control of every sound card (to pick `FACET_VOLUME_CONTROL`) |
+| `FACET_WPA_CTRL` | wpa_supplicant's control socket when it is not `/run/wpa_supplicant/<interface>` (e.g. Android-style systems); also tests Wi-Fi against a fake one |
 | `FACET_SANDBOX_NAMESPACES` | testing: use only these namespaces for plugin containers (e.g. `mnt`), as on kernels that lack the others |
-| `FACET_DEBUG_FRAMES` | log frame rate and drawing time every 5 s |
+| `FACET_DEBUG_FRAMES` | log frame rate and drawing time every 5 s, with how much of the screen each frame redrew |
+| `FACET_FULL_REDRAW` | `1`: draw every frame whole instead of only what changed (to compare) |
+| `FACET_CHECK_PARTIAL` | tests: draw every frame a second time whole and log pixels that differ from the partial redraw (slow) |
 | `FACET_GPU_OPS` | `0`: with the GPU, draw the interface on the CPU and only compose on the GPU |
 
 Plugins are loaded from `<prefix>/lib/facet/plugins/<id>/`,
@@ -150,6 +162,35 @@ Plugins are loaded from `<prefix>/lib/facet/plugins/<id>/`,
 
 For a clean boot without kernel text before the splash, add
 `quiet loglevel=3 vt.global_cursor_default=0` to the kernel command line.
+
+### Wi-Fi
+
+Settings > Network > Wi-Fi lists the networks around, joins them (the
+password is typed on the built-in keyboard, never a keyboard module's) and
+forgets them. Facet drives what the system already runs:
+
+- **NetworkManager** (most desktop and phone images), through `nmcli`. The
+  password goes to nmcli on its standard input, not on a command line other
+  processes could read.
+- **wpa_supplicant** alone (systemd-networkd, ifupdown or dhcpcd setups),
+  through its control socket. Facet keeps the networks it added in its config
+  as the WPA key derived from the password (as `wpa_passphrase` does), not
+  the password itself, and hands them to wpa_supplicant again after a reboot,
+  since such setups often cannot save wpa_supplicant's configuration. An
+  address still comes from the network service. WPA3-only networks need the
+  password itself and keep it. Switching Wi-Fi off uses rfkill.
+
+Networks with a user name and certificates (802.1X, "enterprise") are not set
+up from Facet. iwd is not supported yet.
+
+### Screen rotation
+
+Settings > Appearance > Rotation turns the picture by 90, 180 or 270 degrees
+(a panel mounted sideways), or, with the
+[rotation module](https://github.com/siakinnik/facet-rotation) running,
+follows how the device is held (Automatic). Touches turn with the picture.
+It works while the processor draws; with the graphics card it stays upright
+for now.
 
 ### Hardware buttons
 

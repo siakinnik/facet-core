@@ -113,6 +113,7 @@ attribute vec4 color;
 attribute vec2 param;
 uniform vec2 size;
 uniform vec2 origin;  // the canvas point at the target's top left (a kept layer starts elsewhere)
+uniform float rot;    // the screen only: the picture turned clockwise by rot * 90 degrees onto the panel
 varying vec2 v_uv;
 varying vec4 v_edge;
 varying vec4 v_clip;
@@ -125,7 +126,11 @@ void main() {
     v_color = color;
     v_param = param;
     vec2 p = pos - origin;
-    gl_Position = vec4(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0, 0.0, 1.0);
+    vec2 n = vec2(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0);
+    if (rot > 2.5) n = vec2(-n.y, n.x);
+    else if (rot > 1.5) n = -n;
+    else if (rot > 0.5) n = vec2(n.y, -n.x);
+    gl_Position = vec4(n, 0.0, 1.0);
 }
 )";
 
@@ -365,8 +370,8 @@ public:
         drmModeFreeResources(res);
         if (!crtc_) return fail(error, "no CRTC for the display");
         saved_ = drmModeGetCrtc(drm_, crtc_);
-        w_ = mode_.hdisplay;
-        h_ = mode_.vdisplay;
+        w_ = pw_ = mode_.hdisplay;
+        h_ = ph_ = mode_.vdisplay;
 
         gbm_ = gbm_create_device(drm_);
         if (!gbm_) return fail(error, "GBM is unavailable");
@@ -381,8 +386,8 @@ public:
     // Without a screen; on `device` (a render node) the real GPU draws, else
     // whatever Mesa has (tests).
     bool init_offscreen(int w, int h, const char* device, std::string& error) {
-        w_ = w;
-        h_ = h;
+        w_ = pw_ = w;
+        h_ = ph_ = h;
         auto get_display = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
         if (!get_display) return fail(error, "EGL platform displays are unsupported");
         if (device) {
@@ -531,7 +536,7 @@ public:
         glFinish();  // the core may hand the buffers back to their plugins now
         send_seq("uploaded", seq);
 
-        glViewport(0, 0, w_, h_);
+        glViewport(0, 0, pw_, ph_);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(prog_);
@@ -542,7 +547,7 @@ public:
             scissor(d.clip);
             quad(d.tex, d.dst);
         }
-        glScissor(0, 0, w_, h_);
+        glScissor(0, 0, pw_, ph_);
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glUniform1f(u_opaque_, 0.f);
@@ -603,6 +608,7 @@ public:
         for (GLint a : {o_pos_, o_uv_, o_edge_, o_clip_, o_color_, o_param_})
             if (a >= 0) glEnableVertexAttribArray(GLuint(a));
 
+        glUniform1f(u_rot_, 0.f);  // kept layers are drawn as they are; only the screen turns
         // Kept layers drawn this frame first: what changed in them is part of the screen's damage.
         Tiles from_layers;
         from_layers.reset(w_, h_);
@@ -633,9 +639,10 @@ public:
             for (int k = 0; k < age - 1; ++k) region.merge(hist_[size_t(k)]);
 
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_);  // 0 on the screen
-        glViewport(0, 0, w_, h_);
+        glViewport(0, 0, pw_, ph_);
         glUniform2f(u_size_, float(w_), float(h_));
         glUniform2f(u_origin_, 0.f, 0.f);
+        glUniform1f(u_rot_, float(rot_ / 90));
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         draw_target(0, region, w_, h_, 0.f, 0.f, first_quad_covers_screen() ? -1 : 1);
         if (verify_ && fbo_) verify_frame();
@@ -716,23 +723,24 @@ public:
         }
         {
             GLuint fbo, tex;
-            scratch(w_, h_, fbo, tex);
-            glViewport(0, 0, w_, h_);
+            scratch(pw_, ph_, fbo, tex);
+            glViewport(0, 0, pw_, ph_);
             glUniform2f(u_size_, float(w_), float(h_));
             glUniform2f(u_origin_, 0.f, 0.f);
+            glUniform1f(u_rot_, float(rot_ / 90));
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             Tiles all;
             all.full = true;
             draw_target(0, all, w_, h_, 0.f, 0.f, first_quad_covers_screen() ? -1 : 1);
-            read(fbo, w_, h_, a);
-            read(fbo_, w_, h_, b);
+            read(fbo, pw_, ph_, a);
+            read(fbo_, pw_, ph_, b);
             bad_screen = count(a, b);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glDeleteFramebuffers(1, &fbo);
             glDeleteTextures(1, &tex);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-        glViewport(0, 0, w_, h_);
+        glViewport(0, 0, pw_, ph_);
         ++verified_;
         if (bad_layers || bad_screen) {
             ++verify_bad_;
@@ -801,7 +809,8 @@ public:
             if (area > 0.8 * double(tw) * double(th)) rects = {{0, 0, tw, th}};
         }
         for (const Rect& r : rects) {
-            glScissor(r.x, th - (r.y + r.h), r.w, r.h);
+            if (id == 0) screen_scissor(r);
+            else glScissor(r.x, th - (r.y + r.h), r.w, r.h);
             if (clear >= 0) {
                 glClearColor(0, 0, 0, clear ? 1.f : 0.f);
                 glClear(GL_COLOR_BUFFER_BIT);
@@ -1336,6 +1345,7 @@ private:
         u_size_ = glGetUniformLocation(ops_prog_, "size");
         u_native_ = glGetUniformLocation(ops_prog_, "native");
         u_origin_ = glGetUniformLocation(ops_prog_, "origin");
+        u_rot_ = glGetUniformLocation(ops_prog_, "rot");
         // GPU buffers of plugins: imported as EGL images.
         const char* egl_ext = eglQueryString(dpy_, EGL_EXTENSIONS);
         const char* gl_ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
@@ -1429,7 +1439,29 @@ private:
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     }
 
-    void scissor(const Rect& c) { glScissor(c.x, h_ - (c.y + c.h), std::max(0, c.w), std::max(0, c.h)); }
+    void scissor(const Rect& c) { glScissor(c.x, ph_ - (c.y + c.h), std::max(0, c.w), std::max(0, c.h)); }
+
+    // A rectangle of the (turned) picture as a scissor on the panel.
+    void screen_scissor(const Rect& r) {
+        Rect p = r;  // in panel pixels, y down
+        if (rot_ == 90) p = {pw_ - (r.y + r.h), r.x, r.h, r.w};
+        else if (rot_ == 180) p = {pw_ - (r.x + r.w), ph_ - (r.y + r.h), r.w, r.h};
+        else if (rot_ == 270) p = {r.y, ph_ - (r.x + r.w), r.h, r.w};
+        glScissor(p.x, ph_ - (p.y + p.h), std::max(0, p.w), std::max(0, p.h));
+    }
+
+    // The picture turned clockwise by `deg` on the panel (the core draws it
+    // at the turned size): everything is drawn again.
+    void set_rotation(int deg) {
+        deg = ((deg % 360) + 360) % 360 / 90 * 90;
+        if (deg == rot_) return;
+        rot_ = deg;
+        const bool turned = rot_ == 90 || rot_ == 270;
+        w_ = turned ? ph_ : pw_;
+        h_ = turned ? pw_ : ph_;
+        force_full_ = true;
+        hist_.clear();
+    }
 
     void quad(const Texture& t, const Rect& d) {
         if (!t.id) return;
@@ -1514,13 +1546,13 @@ private:
     }
 
     void dump() {
-        std::vector<uint8_t> px(size_t(w_) * size_t(h_) * 4);
-        glReadPixels(0, 0, w_, h_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        std::vector<uint8_t> px(size_t(pw_) * size_t(ph_) * 4);
+        glReadPixels(0, 0, pw_, ph_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
         FILE* f = std::fopen(dump_.c_str(), "wb");
         if (!f) return;
-        std::fprintf(f, "P6\n%d %d\n255\n", w_, h_);
-        for (int y = h_ - 1; y >= 0; --y)
-            for (int x = 0; x < w_; ++x) std::fwrite(&px[(size_t(y) * size_t(w_) + size_t(x)) * 4], 1, 3, f);
+        std::fprintf(f, "P6\n%d %d\n255\n", pw_, ph_);
+        for (int y = ph_ - 1; y >= 0; --y)
+            for (int x = 0; x < pw_; ++x) std::fwrite(&px[(size_t(y) * size_t(pw_) + size_t(x)) * 4], 1, 3, f);
         std::fclose(f);
     }
 
@@ -1564,7 +1596,10 @@ private:
     GLuint prog_ = 0, fbo_ = 0, rbo_ = 0, ops_prog_ = 0;
     GLint a_pos_ = -1, a_uv_ = -1, u_opaque_ = -1;
     GLint o_pos_ = -1, o_uv_ = -1, o_edge_ = -1, o_clip_ = -1, o_color_ = -1, o_param_ = -1, u_size_ = -1,
-          u_native_ = -1, u_origin_ = -1;
+          u_native_ = -1, u_origin_ = -1, u_rot_ = -1;
+    // The panel (pw_, ph_) and the picture drawn on it (w_, h_: the panel's
+    // size turned by rot_ degrees; ops, tiles and clips are in its pixels).
+    int pw_ = 0, ph_ = 0, rot_ = 0;
     PFNEGLCREATEIMAGEKHRPROC create_image_ = nullptr;
     PFNEGLDESTROYIMAGEKHRPROC destroy_image_ = nullptr;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_ = nullptr;
@@ -1656,6 +1691,7 @@ int main(int argc, char** argv) {
             else if (t == "surface_gpu" && mfd >= 0) gpu.add_gpu_buffer(m, mfd);
             else if (t == "frame") gpu.frame(m);
             else if (t == "power") gpu.power(m["on"].as_bool(true));
+            else if (t == "rotation") gpu.set_rotation(m["value"].as_int(0));
             else if (t == "quit") g_quit = 1;
             else if (mfd >= 0) ::close(mfd);
         }

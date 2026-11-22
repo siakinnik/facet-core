@@ -9,8 +9,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "app/images.h"
 #include "core/config.h"
 #include "core/netstatus.h"
+#include "core/wifi.h"
 #include "facet/keyboard.h"
 #include "gpu/gl_package.h"
 #include "gfx/canvas.h"
@@ -21,6 +23,7 @@
 #include "platform/platform.h"
 #include "platform/volume.h"
 #include "plugins/plugin_host.h"
+#include "ui/canvas_ops.h"
 #include "ui/context.h"
 #include "ui/skin.h"
 
@@ -32,7 +35,7 @@ public:
     int run();
 
 private:
-    enum class View { Splash, Menu, Dashboard, Settings, Graphics, Plugin, Apps, AppInfo, Notifications };
+    enum class View { Splash, Menu, Dashboard, Settings, Graphics, Plugin, Apps, AppInfo, Notifications, Wifi, WifiJoin };
 
     bool init();
     bool load_fonts();
@@ -106,6 +109,15 @@ private:
     double gfx_refresh_ = 0;
     int gfx_phase_ = -1;
     void draw_timezone_settings();
+    // Settings > Network > Wi-Fi, and one network: its password, or what to do with it.
+    void draw_wifi(double t);
+    void draw_wifi_join();
+    net::Wifi wifi_;
+    bool wifi_started_ = false;
+    std::string wifi_ssid_;      // the network of the WifiJoin screen
+    std::string wifi_password_;  // typed there; wiped when used or left
+    double wifi_scan_at_ = 0;    // the Wi-Fi screen scans every so often while open
+    void wipe_wifi_password();
     void draw_status_bar(float right, float cy);
     void draw_build_line(float y);
     void draw_plugin(double t);
@@ -136,6 +148,73 @@ private:
     std::string keyboard_plugin() const;  // selected, running keyboard plugin or "" (built-in)
     std::vector<std::string> keyboard_langs() const;
     void render_plugin_ui(plugins::Plugin& p);
+    // A plugin's UI tree as a screen; true when its Back was pressed.
+    bool render_tree(plugins::Plugin& p, Json& root, const std::string& screen_id, bool back);
+    // A canvas with "drag": the finger's way over it goes to its owner.
+    struct CanvasDrag {
+        bool active = false;
+        std::string plugin, id;
+        float last_x = -1, last_y = -1;
+    } canvas_drag_;
+    void track_canvas_drag(const std::string& owner, const std::string& id, const gfx::Rect& r);
+    // Canvas drawings prepared once (ui::compile_ops) and drawn every frame
+    // until their source changes: a module's new tree, a new keyboard
+    // drawing, another theme pack.
+    struct OpsCache {
+        const void* node = nullptr;
+        uint64_t gen = 0;
+        uint32_t skin = 0;
+        std::shared_ptr<ui::CompiledOps> ops;
+    };
+    std::unordered_map<std::string, OpsCache> ops_cache_;
+    const ui::CompiledOps& cached_ops(const std::string& key, const Json& ops, uint64_t gen);
+    // Pictures of modules' `image` ops: "plugin/<file>" (the module's
+    // folder) or "data/<file>" (its data); nothing outside them.
+    ImageCache images_;
+    std::vector<std::shared_ptr<gfx::Image>> frame_images_;  // alive until the frame is shown
+    const gfx::Image* module_image(const plugins::Plugin& p, const std::string& src);
+    ui::OpsEnv module_env(const plugins::Plugin& p);
+    // A module's free-form screen (root "layout": "free"): surfaces placed
+    // anywhere, its own drawing over them; a swipe down from the top edge leaves.
+    void draw_free_screen(plugins::Plugin& p);
+    double module_back_at_ = -10;  // a module took Back then (the next one within 1.5 s leaves)
+    struct FreePull {
+        bool active = false;
+        float y = 0;
+    } free_pull_;
+    Json builtin_kb_ops_;            // the built-in keyboard's drawing ...
+    float builtin_kb_h_ = 0, builtin_kb_w_ = -1;
+    uint64_t builtin_kb_gen_ = 1;    // ... rebuilt when this changes
+    uint64_t builtin_kb_built_ = 0;
+
+    // ---- System modules (docs/ARCHITECTURE.md §3.10).
+    void handle_system_requests(double t);
+    // Lock screen (system.lock): fail-closed. While locked only the lock
+    // screen, calls and the power menu are shown.
+    bool locked_ = false;
+    pid_t lock_told_pid_ = -1;  // the lock module process that knows the current state
+    void set_locked(bool on);
+    bool lock_required();       // a lock is set up and its module is enabled
+    void draw_lock();
+    // Shade (system.shade): pulled down from the top edge.
+    bool shade_open_ = false;
+    struct ShadePull {
+        bool active = false;
+        float start_y = 0;
+    } shade_pull_;
+    std::string shade_sent_;  // the last state sent to the shade module
+    void open_shade(bool open);
+    void draw_shade(double t);
+    Json shade_state(double t);
+    // Rotation: the picture turned clockwise on the panel (Settings, or a
+    // display.rotation module); only when the processor draws it.
+    int rotation_ = 0;
+    int sensor_rotation_ = -1;  // what the rotation module says, -1 = nothing yet
+    int panel_w_ = 0, panel_h_ = 0;
+    gfx::Canvas rotated_;       // the canvas turned to the panel
+    bool rotation_supported() const { return (!layers_ && !ops_) || (platform_ && platform_->rotates_itself()); }
+    void apply_rotation();
+    void to_logical(float& x, float& y) const;
     // Surfaces (screens.cpp): a widget or the whole screen; forwards touches
     // to the surface's owner (the plugin itself or a provider that lent it).
     void draw_surface(plugins::Plugin& p, const std::string& id, const gfx::Rect& r);
@@ -197,6 +276,8 @@ private:
     void draw_fps_counter(double t);
     bool bench_ = false;  // FACET_BENCH: draw continuously, whatever changed
     int stat_frames_ = 0;
+    int stat_rf_count_ = 0;  // every drawn frame, also those drawn for a touch
+    double stat_rf_ms_ = 0, stat_rf_max_ = 0, stat_area_ = 0;
     double stat_draw_ = 0, stat_present_ = 0, stat_since_ = 0, stat_layers_ = 0;
     bool display_on_ = true;
     double last_input_ = 0, last_touch_ = 0, last_activity_sent_ = 0;

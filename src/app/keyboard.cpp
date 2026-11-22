@@ -63,20 +63,28 @@ void App::draw_keyboard() {
         if (secure && en != langs.end()) std::rotate(langs.begin(), en, en + 1);
         builtin_kb_.configure(mode, langs);
         builtin_kb_.set_labels({tr("Done"), tr("space"), "?123", "ABC"});
+        ++builtin_kb_gen_;
         if (!want.empty()) host_.keyboard_show(want, number ? "number" : "text", width_dp, keyboard_langs());
         kb_ = {true, field, want, surface_owner};
     }
 
     // The plugin's drawing once it has answered; the built-in one until then.
     const bool from_plugin = !kb_.plugin.empty() && host_.keyboard_ready(kb_.plugin);
-    Json ops;
+    const ui::CompiledOps* ops = nullptr;
     float h = 0;
     if (from_plugin) {
         const plugins::Plugin* p = host_.find(kb_.plugin);
-        ops = p->keyboard_ops;
+        ops = &cached_ops("keyboard\n" + kb_.plugin, p->keyboard_ops, p->ui_gen);
         h = p->keyboard_height;
     } else {
-        ops = builtin_kb_.build(width_dp, h).ops();
+        // Built again only when it changes (a layout, shift, another width).
+        if (width_dp != builtin_kb_w_) builtin_kb_w_ = width_dp, ++builtin_kb_gen_;
+        if (builtin_kb_built_ != builtin_kb_gen_) {
+            builtin_kb_ops_ = builtin_kb_.build(width_dp, builtin_kb_h_).ops();
+            builtin_kb_built_ = builtin_kb_gen_;
+        }
+        ops = &cached_ops("keyboard\nbuiltin", builtin_kb_ops_, builtin_kb_gen_);
+        h = builtin_kb_h_;
     }
     h = std::min(h, float(H) / theme_.scale * 0.6f);  // never cover most of the screen
 
@@ -85,7 +93,7 @@ void App::draw_keyboard() {
     ui_.begin_overlay();
     canvas_.fill_rect(r, theme_.c.bg);
     canvas_.fill_rect({0, r.y, W, std::max(1.f, theme_.dp(1))}, theme_.c.divider);
-    std::string hit = ui::draw_ops(ui_, "__keyboard", ops, r);
+    std::string hit = ui::draw_compiled(ui_, "__keyboard", *ops, r, ui::OpsEnv{});
     ui_.end_overlay();
 
     if (!hit.empty()) {
@@ -93,6 +101,7 @@ void App::draw_keyboard() {
             host_.keyboard_key(kb_.plugin, hit);
         } else {
             sdk::KeyAction a = builtin_kb_.press(hit);
+            ++builtin_kb_gen_;  // shift, symbols: maybe another drawing
             using K = sdk::KeyAction::Kind;
             if (a.kind == K::Insert) kb_pending_.emplace_back("insert", a.text);
             else if (a.kind == K::Backspace) kb_pending_.emplace_back("backspace", "");

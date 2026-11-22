@@ -17,6 +17,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <grp.h>
+#include <linux/input.h>
+#include <sys/ioctl.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -208,7 +210,7 @@ void run_op(const Op& op) {
             if (mount("tmpfs", dst, "tmpfs", MS_NOSUID, op.data.c_str()) != 0) fail("tmpfs", dst);
             break;
         case Op::Bind:
-            if (mount(op.src.c_str(), dst, nullptr, MS_BIND | (op.rec ? MS_REC : 0), nullptr) != 0) fail("bind", dst);
+            if (mount(op.src.c_str(), dst, nullptr, MS_BIND | (op.rec ? static_cast<unsigned long>(MS_REC) : 0UL), nullptr) != 0) fail("bind", dst);
             if (op.ro) make_ro(dst, op.rec);
             break;
         case Op::Proc:
@@ -294,7 +296,40 @@ bool prepare_endpoint_dir(const std::string& dir, uid_t uid) {
     return chmod(dir.c_str(), 0755) == 0;
 }
 
+namespace {
+// Motion sensors behind evdev: absolute X, Y and Z axes, no touch button and
+// no touchscreen or pointer property (an accelerometer, never the
+// touchscreen or a keyboard).
+bool is_motion_sensor(const std::string& path) {
+    int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    auto bit = [](const unsigned long* bits, int b) {
+        constexpr int kBits = sizeof(unsigned long) * 8;
+        return (bits[b / kBits] >> (b % kBits)) & 1;
+    };
+    unsigned long ev[EV_MAX / (sizeof(long) * 8) + 1] = {};
+    unsigned long abs[ABS_MAX / (sizeof(long) * 8) + 1] = {};
+    unsigned long keys[KEY_MAX / (sizeof(long) * 8) + 1] = {};
+    unsigned long props[INPUT_PROP_MAX / (sizeof(long) * 8) + 1] = {};
+    ioctl(fd, EVIOCGBIT(0, sizeof ev), ev);
+    ioctl(fd, EVIOCGBIT(EV_ABS, sizeof abs), abs);
+    if (bit(ev, EV_KEY)) ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys);
+    ioctl(fd, EVIOCGPROP(sizeof props), props);
+    close(fd);
+    if (!bit(ev, EV_ABS) || !bit(abs, ABS_X) || !bit(abs, ABS_Y) || !bit(abs, ABS_Z)) return false;
+    if (bit(props, INPUT_PROP_ACCELEROMETER)) return true;
+    return !bit(abs, ABS_MT_POSITION_X) && !bit(keys, BTN_TOUCH) && !bit(keys, BTN_TOOL_FINGER) &&
+           !bit(keys, BTN_LEFT) && !bit(props, INPUT_PROP_DIRECT) && !bit(props, INPUT_PROP_POINTER);
+}
+}  // namespace
+
 std::vector<std::string> device_nodes(const std::string& permission) {
+    if (permission == kSensors) {
+        std::vector<std::string> out = list_dev("/dev", [](const std::string& n) { return starts_with(n, "iio:device"); });
+        for (const auto& p : list_dev("/dev/input", [](const std::string& n) { return starts_with(n, "event"); }))
+            if (is_motion_sensor(p)) out.push_back(p);
+        return out;
+    }
     if (permission == kCamera) return list_dev("/dev", [](const std::string& n) { return starts_with(n, "video"); });
     // ALSA: pcmC<card>D<dev>c records, ...p plays; both need the control and timer nodes.
     if (permission == kMicrophone)
@@ -587,9 +622,10 @@ pid_t spawn(const Spec& spec, int stdin_fd, int stdout_fd, int stderr_fd) {
         // same, and may not be allowed: the host's is bound instead.
         if (namespaces().pid) ops.push_back({Op::Proc, {}, stage + "/proc"});
         else ops.push_back({Op::Bind, "/proc", stage + "/proc", false, true});
-        if (has(spec.granted, kGpu)) {
+        if (has(spec.granted, kGpu) || has(spec.granted, kSensors)) {
             // The GPU drivers find their device (PCI ids, the render node
-            // behind a device number) in sysfs; read-only.
+            // behind a device number) in sysfs, sensors read their values
+            // there (/sys/bus/iio); read-only.
             ops.push_back({Op::Dir, {}, stage + "/sys"});
             ops.push_back({Op::Bind, "/sys", stage + "/sys", true, true});
         }

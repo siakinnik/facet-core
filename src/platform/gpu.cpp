@@ -246,6 +246,15 @@ public:
         return out;
     }
 
+    bool rotates_itself() const override { return ops_; }
+    void set_rotation(int degrees) override {
+        if (!ch_.valid()) return;
+        Json m = Json::object();
+        m["t"] = "rotation";
+        m["value"] = degrees;
+        ch_.send(m);
+    }
+
     void set_display_power(bool on) override {
         if (ch_.valid()) {
             Json m = Json::object();
@@ -281,6 +290,11 @@ private:
         std::string helper = dev ? dev : opt_.gl_dir + "/bin/facet-gpu";
         if (!exists(helper)) return fail("the OpenGL package is not installed");
         bool offscreen = inner_ != nullptr;
+        // Facet starts early in boot: the graphics driver may load a moment later.
+        if (!offscreen && !opt_.card.empty() && !exists(opt_.card)) {
+            log::info("gpu: waiting for %s", opt_.card.c_str());
+            for (int i = 0; i < 150 && !exists(opt_.card); ++i) usleep(100 * 1000);
+        }
         if (!offscreen && (opt_.card.empty() || !exists(opt_.card))) return fail("no graphics device " + opt_.card);
 
         int sv[2];

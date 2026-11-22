@@ -12,7 +12,7 @@
 
 namespace facet::platform {
 
-enum class EventType { Down, Up, Move, Resize, Quit, Wheel, KeyDown, KeyUp };
+enum class EventType { Down, Up, Move, Resize, Quit, Wheel, KeyDown, KeyUp, Text };
 
 // Hardware buttons of phones and boards: volume and power on the side, and
 // the Back / Home / Menu row under the screen (keys or touch areas).
@@ -26,6 +26,7 @@ struct Event {
     bool mouse = false;  // from a mouse, not a finger (shows the pointer)
     Key key = Key::Unknown;  // KeyDown / KeyUp
     bool repeat = false;  // KeyDown: the key is held (autorepeat)
+    std::string text = {};  // Text: typed into the focused field (tests)
 };
 
 // The Key for a Linux input key code (KEY_*), Key::Unknown for others.
@@ -60,6 +61,11 @@ public:
     virtual void pump(std::vector<Event>& out) = 0;
 
     virtual void present(const gfx::Canvas& canvas) = 0;
+    // Only `damage` changed since the last present (partial redraw).
+    virtual void present_damage(const gfx::Canvas& canvas, const std::vector<gfx::Rect>& damage) {
+        (void)damage;
+        present(canvas);
+    }
 
     // ---- GPU composition (only backends that support layers).
     virtual bool supports_layers() const { return false; }
@@ -89,6 +95,11 @@ public:
     }
     // True once after the helper (re)started: it has no uploaded masks.
     virtual bool take_ops_lost() { return false; }
+    // The backend turns the picture onto the panel itself (the GPU helper
+    // drawing commands): the canvas is drawn at the turned size, touches stay
+    // the app's to turn back.
+    virtual bool rotates_itself() const { return false; }
+    virtual void set_rotation(int degrees) { (void)degrees; }
     virtual void set_display_power(bool on) = 0;
     virtual bool has_brightness() const { return false; }
     virtual void set_brightness(int percent) { (void)percent; }

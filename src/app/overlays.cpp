@@ -61,6 +61,8 @@ gfx::Rect App::banner_rect() const {
 }
 
 bool App::modal_active(double t) {
+    // Locked: a call can be answered and the device turned off; the rest waits.
+    if (locked_) return host_.notifications().ringing(t) || power_dialog_ != PowerDialog::None;
     return host_.pending_prompt() || host_.notifications().ringing(t) || gfx_dialog_ != GfxDialog::None ||
            power_dialog_ != PowerDialog::None;
 }
@@ -74,6 +76,7 @@ void App::prepare_overlays(double t) {
         return;
     }
     if (banner_ && t >= banner_until_) banner_.reset();
+    if (locked_ || shade_open_) return;  // banners wait (the shade lists them anyway)
     if (!banner_ && !kb_.visible && display_on_) {
         if (auto n = host_.notifications().next_banner()) {
             banner_ = *n;
@@ -85,9 +88,12 @@ void App::prepare_overlays(double t) {
 
 void App::draw_overlays(double t) {
     if (view_ == View::Splash) return;
-    draw_indicators();
+    if (!locked_) draw_indicators();
     ui_.begin_overlay();
-    if (const plugins::PermissionPrompt* q = host_.pending_prompt()) {
+    if (locked_) {
+        if (plugins::Notification* call = host_.notifications().ringing(t)) draw_call(*call, t);
+        else if (power_dialog_ != PowerDialog::None) draw_power_dialog();
+    } else if (const plugins::PermissionPrompt* q = host_.pending_prompt()) {
         draw_permission_prompt(*q, t);
     } else if (plugins::Notification* call = host_.notifications().ringing(t)) {
         draw_call(*call, t);

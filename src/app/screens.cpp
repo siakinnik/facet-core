@@ -4,8 +4,10 @@
 #include <sys/wait.h>
 
 #include <algorithm>
+#include <map>
 #include <iterator>
 #include <cmath>
+#include <climits>
 #include <cstring>
 #include <ctime>
 
@@ -398,6 +400,28 @@ void App::draw_settings(double) {
     } else {
         ui_.info(tr("Brightness"), tr("no backlight control"), ui::Tone::Dim);
     }
+    {
+        // Fixed, or following a rotation module's sensor.
+        bool sensor = false;
+        for (const auto& p : host_.plugins())
+            if (p->state == plugins::State::Running && p->m.provides_cap("display.rotation")) sensor = true;
+        std::vector<std::string> names;
+        if (sensor) names.push_back(tr("Automatic"));
+        for (int deg : {0, 90, 180, 270}) names.push_back(std::to_string(deg) + "°");
+        int sel = config_.get_int("rotation", 0) / 90 + (sensor ? 1 : 0);
+        if (sensor && config_.get_bool("rotation_auto", true)) sel = 0;
+        if (!rotation_supported()) {
+            ui_.info(tr("Rotation"), tr("not with graphics card drawing"), ui::Tone::Dim);
+        } else if (ui_.select("rotation", tr("Rotation"), names, sel)) {
+            if (sensor && sel == 0) {
+                config_.set("rotation_auto", true);
+            } else {
+                if (sensor) config_.set("rotation_auto", false);
+                config_.set("rotation", (sel - (sensor ? 1 : 0)) * 90);
+            }
+            apply_rotation();
+        }
+    }
     std::vector<std::string> lang_names;
     int lang_index = 0;
     for (size_t i = 0; i < languages().size(); ++i) {
@@ -475,6 +499,18 @@ void App::draw_settings(double) {
     }
 
     ui_.section(tr("Network"));
+    if (wifi_started_) {
+        // Always there: on a phone the adapter may appear only once switched on.
+        net::Wifi::State ws = wifi_.state();
+        bool none = ws.backend == net::Wifi::Backend::None || ws.backend == net::Wifi::Backend::Detecting;
+        std::string value = ws.iface.empty() && !ws.can_power ? tr("no Wi-Fi adapter")
+                            : none && !ws.can_power        ? tr("not available")
+                            : !ws.enabled                  ? tr("Off")
+                            : !ws.current.empty()          ? ws.current
+                                                           : tr("not connected");
+        if (ui_.link("wifi", tr("Wi-Fi"), value, ws.current.empty() ? ui::Tone::Dim : ui::Tone::Normal))
+            navigate(View::Wifi);
+    }
     net::Status st = net_.status();
     if (st.kind == net::Kind::Offline) {
         ui_.info(tr("Connection"), tr("Offline"), ui::Tone::Warn);
@@ -515,11 +551,15 @@ void App::draw_timezone_settings() {
     const std::string zone = config_.get_str("timezone", "");
 
     // Regions: system, UTC, then every tzdata region ("Europe", "America", ...).
-    std::vector<std::string> regions = {"", "UTC"};
-    for (const auto& z : tz::zones()) {
-        std::string r = tz::region_of(z);
-        if (r != "UTC" && std::find(regions.begin(), regions.end(), r) == regions.end()) regions.push_back(r);
-    }
+    // The zones do not change while Facet runs: worked out once, not every frame.
+    static const std::vector<std::string> regions = [] {
+        std::vector<std::string> out = {"", "UTC"};
+        for (const auto& z : tz::zones()) {
+            std::string r = tz::region_of(z);
+            if (r != "UTC" && std::find(out.begin(), out.end(), r) == out.end()) out.push_back(r);
+        }
+        return out;
+    }();
     std::string sys = tz::system_zone();
     std::vector<std::string> labels = {tr("System ({})", {sys.empty() ? tr("unknown") : sys}), "UTC"};
     for (size_t i = 2; i < regions.size(); ++i) labels.push_back(tr(regions[i]));
@@ -534,14 +574,19 @@ void App::draw_timezone_settings() {
     }
 
     if (!region.empty() && region != "UTC") {
-        std::vector<std::string> cities, city_labels;
-        int ci = -1;
-        for (const auto& z : tz::zones()) {
-            if (tz::region_of(z) != region) continue;
-            if (z == zone) ci = int(cities.size());
-            cities.push_back(z);
-            city_labels.push_back(tz::city_label(z));
+        static std::map<std::string, std::pair<std::vector<std::string>, std::vector<std::string>>> by_region;
+        auto it = by_region.find(region);
+        if (it == by_region.end()) {
+            std::pair<std::vector<std::string>, std::vector<std::string>> e;
+            for (const auto& z : tz::zones())
+                if (tz::region_of(z) == region) e.first.push_back(z), e.second.push_back(tz::city_label(z));
+            it = by_region.emplace(region, std::move(e)).first;
         }
+        const std::vector<std::string>& cities = it->second.first;
+        const std::vector<std::string>& city_labels = it->second.second;
+        int ci = -1;
+        for (size_t i = 0; i < cities.size(); ++i)
+            if (cities[i] == zone) ci = int(i);
         if (ui_.select("tz_city", tr("City"), city_labels, ci) && ci >= 0) set_timezone(cities[size_t(ci)]);
     }
     ui_.info(tr("Local time"), hhmm(local_now()));
@@ -801,24 +846,258 @@ void App::draw_graphics() {
     ui_.end_screen();
 }
 
+// ------------------------------------------------------------------ Wi-Fi
+
+void App::draw_wifi(double) {
+    using W = net::Wifi;
+    if (ui_.begin_screen("wifi", tr("Wi-Fi")) == ui::HeaderHit::Back) {
+        navigate(View::Settings);
+        ui_.end_screen();
+        return;
+    }
+    W::State s = wifi_.state();
+    if (s.backend == W::Backend::Detecting) {
+        ui_.info(tr("Wi-Fi"), tr("looking for the adapter…"), ui::Tone::Dim);
+        ui_.end_screen();
+        return;
+    }
+    if (s.backend == W::Backend::None) {
+        if (s.can_power) {
+            // A MediaTek chip that is off: switching it on makes the adapter.
+            bool on = false;
+            if (ui_.toggle("wifi_on", tr("Wi-Fi"), on)) wifi_.set_enabled(true);
+            ui_.note(tr("Wi-Fi is off."));
+        } else if (s.iface.empty()) {
+            ui_.info(tr("Wi-Fi"), tr("no Wi-Fi adapter"), ui::Tone::Dim);
+            ui_.note(tr("No wireless adapter was found. Facet keeps looking, so an adapter whose driver loads later "
+                        "shows up here."));
+        } else {
+            ui_.info(tr("Wi-Fi"), tr("not available"), ui::Tone::Dim);
+            ui_.note(s.has_wpa ? tr("Nothing manages {} and Facet may not start wpa_supplicant for it: Facet has to "
+                                    "run as root.",
+                                    {s.iface})
+                               : tr("Facet connects through NetworkManager or wpa_supplicant; neither is installed "
+                                    "for {} on this system.",
+                                    {s.iface}));
+        }
+        ui_.end_screen();
+        return;
+    }
+    if (s.can_toggle) {
+        bool on = s.enabled;
+        if (ui_.toggle("wifi_on", tr("Wi-Fi"), on)) wifi_.set_enabled(on);
+    }
+    if (!s.enabled) {
+        ui_.note(tr("Wi-Fi is off."));
+        ui_.end_screen();
+        return;
+    }
+    if (s.phase == W::Phase::WrongPassword) ui_.info(s.target, tr("wrong password"), ui::Tone::Bad);
+    else if (s.phase == W::Phase::Failed)
+        ui_.info(s.target, s.error.empty() ? tr("could not connect") : s.error, ui::Tone::Bad);
+
+    ui_.section(tr("Networks"));
+    for (const auto& n : s.networks) {
+        std::string value;
+        ui::Tone tone = ui::Tone::Normal;
+        if (s.phase == W::Phase::Connecting && s.target == n.ssid) value = tr("connecting…"), tone = ui::Tone::Dim;
+        else if (n.current) value = tr("Connected"), tone = ui::Tone::Good;
+        else if (n.enterprise && !n.saved) value = tr("not supported"), tone = ui::Tone::Dim;
+        else if (n.saved) value = tr("Saved");
+        else value = (n.secured ? "" : tr("open") + " · ") + std::to_string(n.signal) + "%";
+        if (!ui_.link("wifi:" + n.ssid, n.ssid, value, tone)) continue;
+        if (n.current || n.saved) {
+            wifi_ssid_ = n.ssid;
+            navigate(View::WifiJoin);
+        } else if (n.enterprise) {
+            // Needs a user name and certificates: set up outside Facet.
+        } else if (!n.secured) {
+            wifi_.connect(n.ssid, {});
+        } else {
+            wifi_ssid_ = n.ssid;
+            navigate(View::WifiJoin);
+        }
+    }
+    if (s.networks.empty()) ui_.note(s.scanning ? tr("Searching…") : tr("No networks found."));
+    else if (s.scanning) ui_.note(tr("Searching…"));
+    if (ui_.button("wifi_scan", tr("Search again"))) wifi_.scan();
+    ui_.end_screen();
+}
+
+// One network: the password of a new one, or Connect / Disconnect / Forget
+// for a saved one (also to give a saved network a new password).
+void App::draw_wifi_join() {
+    using W = net::Wifi;
+    if (ui_.begin_screen("wifijoin", wifi_ssid_) == ui::HeaderHit::Back) {
+        navigate(View::Wifi);
+        ui_.end_screen();
+        return;
+    }
+    W::State s = wifi_.state();
+    const net::WifiNetwork* n = nullptr;
+    for (const auto& c : s.networks)
+        if (c.ssid == wifi_ssid_) n = &c;
+    bool current = n && n->current, saved = n && n->saved;
+    if (n) ui_.info(tr("Signal"), std::to_string(n->signal) + "%");
+    if (current) {
+        ui_.info(tr("Status"), tr("Connected"), ui::Tone::Good);
+        if (ui_.button("wifi_disconnect", tr("Disconnect"))) {
+            wifi_.disconnect();
+            navigate(View::Wifi);
+        }
+    } else if (saved) {
+        if (ui_.button("wifi_connect_saved", tr("Connect"), ui::ButtonStyle::Primary)) {
+            wifi_.connect(wifi_ssid_, {});
+            navigate(View::Wifi);
+            ui_.end_screen();
+            return;
+        }
+    }
+    if (saved) {
+        if (ui_.button("wifi_forget", tr("Forget this network"), ui::ButtonStyle::Danger)) {
+            wifi_.forget(wifi_ssid_);
+            navigate(View::Wifi);
+            ui_.end_screen();
+            return;
+        }
+        ui_.section(tr("New password"));
+    }
+    if (!current) {
+        ui::Context::TextOptions o;
+        o.secure = true;  // dots, and always the built-in keyboard
+        o.max_length = 63;
+        o.placeholder = tr("Wi-Fi password");
+        ui::Context::TextResult r = ui_.text_field("wifi_password", tr("Password"), wifi_password_, o);
+        bool go = r.submitted;
+        if (ui_.button("wifi_join", tr("Connect"), saved ? ui::ButtonStyle::Normal : ui::ButtonStyle::Primary))
+            go = true;
+        if (go && !wifi_password_.empty()) {
+            wifi_.connect(wifi_ssid_, wifi_password_);
+            navigate(View::Wifi);  // wipes the password
+        }
+    }
+    ui_.end_screen();
+}
+
 // Draws a plugin's declarative UI tree with the same widgets as built-in
 // screens. Changes are applied locally at once, then sent as events.
 void App::render_plugin_ui(plugins::Plugin& p) {
     const Json& root = p.ui;
+    if (root["layout"].str() == "free") {
+        draw_free_screen(p);
+        return;
+    }
     if (root["fullscreen"].is_string()) {
         if (plugins::SurfaceRef s = host_.find_surface(p, root["fullscreen"].str())) {
             draw_fullscreen_surface(s, root["fullscreen"].str());
             return;
         }
     }
-    std::string title = root["title"].as_string(p.m.name.get(catalog().language()));
-    if (ui_.begin_screen("plugin:" + p.m.id, title) == ui::HeaderHit::Back) {
+    if (render_tree(p, p.ui, "plugin:" + p.m.id, true)) {
+        // A module with screens of its own may take Back (event "__back");
+        // a second Back right after always leaves, so none can trap the user.
+        if (root["back"].str() == "event" && frame_t_ - module_back_at_ > 1.5) {
+            module_back_at_ = frame_t_;
+            host_.send_event(p.m.id, "__back", true);
+        } else {
+            module_back_at_ = -10;
+            leave_plugin();
+        }
+    }
+}
+
+const gfx::Image* App::module_image(const plugins::Plugin& p, const std::string& src) {
+    std::string base, rel;
+    if (src.rfind("plugin/", 0) == 0) base = p.m.dir, rel = src.substr(7);
+    else if (src.rfind("data/", 0) == 0) base = paths::data_root() + "/data/" + p.m.id, rel = src.substr(5);
+    else return nullptr;
+    if (rel.empty() || rel[0] == '/' || rel.find("..") != std::string::npos) return nullptr;
+    // Resolved, links included: a link out of the folder is refused.
+    char real[PATH_MAX], real_base[PATH_MAX];
+    if (!realpath((base + "/" + rel).c_str(), real) || !realpath(base.c_str(), real_base)) return nullptr;
+    size_t n = std::strlen(real_base);
+    if (std::strncmp(real, real_base, n) != 0 || real[n] != '/') return nullptr;
+    std::shared_ptr<gfx::Image> img = images_.get(real, frame_t_);
+    if (!img) return nullptr;
+    frame_images_.push_back(img);
+    return img.get();
+}
+
+ui::OpsEnv App::module_env(const plugins::Plugin& p) {
+    ui::OpsEnv env;
+    env.image = [this, &p](const std::string& src) { return module_image(p, src); };
+    return env;
+}
+
+void App::draw_free_screen(plugins::Plugin& p) {
+    const Json& root = p.ui;
+    const float W = float(canvas_.width()), H = float(canvas_.height());
+    const Rect box{0, 0, W, H};
+    fullscreen_shown_ = true;
+    canvas_.fill_rect(box, ui::color_from(theme_, root["background"].as_string("bg"), theme_.c.bg));
+    // Surfaces (video) under the drawing.
+    for (const auto& s : root["surfaces"].items()) {
+        const std::string id = s["id"].str();
+        plugins::SurfaceRef ref = host_.find_surface(p, id);
+        Rect r = ui::resolve_rect(ui_, s, box).intersect(box);
+        if (!ref || r.empty()) continue;
+        const plugins::SurfaceBuffer* sb = ref.buffer;
+        const float iw = float(sb->w), ih = float(sb->h);
+        const std::string& fit = s["fit"].str();
+        Rect dst = r;
+        if (fit == "cover") {
+            float k = std::max(r.w / iw, r.h / ih);
+            dst = {r.cx() - iw * k / 2, r.cy() - ih * k / 2, iw * k, ih * k};
+        } else if (fit != "fill") {
+            float k = std::min(r.w / iw, r.h / ih);
+            dst = {r.cx() - iw * k / 2, r.cy() - ih * k / 2, iw * k, ih * k};
+        }
+        surface_owners_.push_back(ref.owner->m.id);
+        put_surface(ref, id, dst, r);
+        if (s["touch"].as_bool()) track_surface_touch(ref.owner->m.id, id, dst.intersect(r), sb->w, sb->h, false);
+    }
+    // The module's drawing over everything: controls, titles, pictures.
+    const std::string cid = root["id"].as_string("screen");
+    const ui::CompiledOps& ops = cached_ops(p.m.id + "\nfree", root["ops"], p.ui_gen);
+    std::string hit = ui::draw_compiled(ui_, cid, ops, box, module_env(p));
+    if (!hit.empty()) host_.send_event(p.m.id, cid, hit);
+    if (root["drag"].as_bool()) track_canvas_drag(p.m.id, cid, box);
+    // The top edge stays Facet's: a swipe down from it leaves, so no module can trap the user.
+    const Theme& t = theme_;
+    float pw = t.dp(56), ph = t.dp(5);
+    canvas_.fill_round_rect({(W - pw) / 2, t.dp(6), pw, ph}, ph / 2, gfx::Color{255, 255, 255, 110});
+    if (pointer_.pressed && pointer_.y < t.dp(28)) free_pull_ = {true, pointer_.y};
+    if (free_pull_.active && pointer_.down && pointer_.y - free_pull_.y > H * 0.12f) {
+        free_pull_ = {};
         leave_plugin();
-        ui_.end_screen();
         return;
     }
-    if (!root["items"].is_array()) p.ui["items"] = Json::array();
-    Json& items = p.ui["items"];
+    if (!pointer_.down) free_pull_ = {};
+}
+
+const ui::CompiledOps& App::cached_ops(const std::string& key, const Json& ops, uint64_t gen) {
+    OpsCache& c = ops_cache_[key];
+    if (!c.ops || c.node != &ops || c.gen != gen || c.skin != skin_serial_) {
+        c.ops = ui::compile_ops(ui_, ops);
+        c.node = &ops, c.gen = gen, c.skin = skin_serial_;
+    }
+    if (ops_cache_.size() > 256) {  // screens that are gone; drop all but this one
+        OpsCache keep = c;
+        ops_cache_.clear();
+        return *(ops_cache_[key] = keep).ops;
+    }
+    return *c.ops;
+}
+
+bool App::render_tree(plugins::Plugin& p, Json& tree, const std::string& screen_id, bool back) {
+    const Json& root = tree;
+    std::string title = root["title"].as_string(back ? p.m.name.get(catalog().language()) : std::string());
+    if (ui_.begin_screen(screen_id, title, back) == ui::HeaderHit::Back) {
+        ui_.end_screen();
+        return true;
+    }
+    if (!root["items"].is_array()) tree["items"] = Json::array();
+    Json& items = tree["items"];
     for (size_t i = 0; i < items.size(); ++i) {
         Json& it = items.at(i);   // written on local (optimistic) updates
         const Json& ci = it;      // reads never insert keys
@@ -883,8 +1162,11 @@ void App::render_plugin_ui(plugins::Plugin& p) {
             }
             draw_surface(p, id, ui_.block(std::clamp(h_dp, 1.f, 4000.f)));
         } else if (type == "canvas") {
-            std::string hit = ui::draw_canvas(ui_, id, ci);
+            Rect r = ui_.block(std::clamp(float(ci["height"].as_number(0)), 0.f, 4000.f));
+            const ui::CompiledOps& ops = cached_ops(p.m.id + "\n" + screen_id + "\n" + id, ci["ops"], p.ui_gen);
+            std::string hit = ui::draw_compiled(ui_, id, ops, r, module_env(p));
             if (!hit.empty()) host_.send_event(p.m.id, id, hit);
+            if (ci["drag"].as_bool()) track_canvas_drag(p.m.id, id, r);
         } else if (type == "button") {
             const std::string& st = ci["style"].str();
             auto style = st == "primary" ? ui::ButtonStyle::Primary
@@ -894,6 +1176,36 @@ void App::render_plugin_ui(plugins::Plugin& p) {
         }
     }
     ui_.end_screen();
+    return false;
+}
+
+// A finger that goes down on a drag canvas stays with it until it lifts:
+// the screen does not scroll, and every move is sent in dp from its corner
+// (one per frame at most).
+void App::track_canvas_drag(const std::string& owner, const std::string& id, const Rect& r) {
+    const float s = theme_.scale;
+    auto send = [&](const char* phase) {
+        Json v = Json::object();
+        v["phase"] = phase;
+        v["x"] = std::round((pointer_.x - r.x) / s * 10) / 10;
+        v["y"] = std::round((pointer_.y - r.y) / s * 10) / 10;
+        host_.send_event(owner, id, v);
+    };
+    if (pointer_.pressed && !canvas_drag_.active && r.contains(pointer_.x, pointer_.y) &&
+        ui_.canvas().clip().contains(pointer_.x, pointer_.y) && !ui_.overlay().contains(pointer_.x, pointer_.y)) {
+        canvas_drag_ = {true, owner, id, pointer_.x, pointer_.y};
+        ui_.stop_scroll();
+        send("down");
+        return;
+    }
+    if (!canvas_drag_.active || canvas_drag_.plugin != owner || canvas_drag_.id != id) return;
+    if (pointer_.down) {
+        if (pointer_.x != canvas_drag_.last_x || pointer_.y != canvas_drag_.last_y) send("move");
+        canvas_drag_.last_x = pointer_.x, canvas_drag_.last_y = pointer_.y;
+    } else {
+        send("up");
+        canvas_drag_ = {};
+    }
 }
 
 // ------------------------------------------------------------------ surfaces
@@ -930,7 +1242,7 @@ void App::put_surface(const plugins::SurfaceRef& s, const std::string& id, const
         }
         cpu_surfaces_.emplace_back(s.owner->m.id, id);  // over the limit: copied like without a GPU
     }
-    canvas_.draw_pixels(sb->pixels(), sb->w, sb->h, sb->stride / 4, dst);
+    if (const uint32_t* px = sb->pixels()) canvas_.draw_pixels(px, sb->w, sb->h, sb->stride / 4, dst);
 }
 
 // The plugin's pixels on the whole screen. The top edge stays Facet's: a

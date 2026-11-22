@@ -55,6 +55,7 @@ private:
     float units_per_em_ = 1000, ascent_ = 800, descent_ = -200, cap_height_ = 700;
 
     std::unordered_map<uint64_t, Glyph> cache_;
+    std::unordered_map<uint64_t, float> widths_;  // measure(): text and size -> width
     Rasterizer raster_;
 };
 

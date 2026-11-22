@@ -133,11 +133,17 @@ Screen& Screen::text_field(std::string id, std::string label, std::string value,
     return *this;
 }
 
-Screen& Screen::canvas(std::string id, float height, const Canvas& canvas) {
+Screen& Screen::handles_back(bool on) {
+    if (on) root_["back"] = "event";
+    return *this;
+}
+
+Screen& Screen::canvas(std::string id, float height, const Canvas& canvas, bool drag) {
     Json& j = add("canvas");
     j["id"] = std::move(id);
     j["height"] = height;
     j["ops"] = canvas.ops();
+    if (drag) j["drag"] = true;
     return *this;
 }
 
@@ -175,48 +181,48 @@ void set_hit(Json& j, std::string hit, std::string pressed) {
 }
 }  // namespace
 
-Canvas& Canvas::rect(float x, float y, float w, float h, std::string color, std::string hit, std::string pressed) {
+Canvas& Canvas::rect(Num x, Num y, Num w, Num h, std::string color, std::string hit, std::string pressed) {
     Json& j = add("rect");
-    j["x"] = x, j["y"] = y, j["w"] = w, j["h"] = h;
+    j["x"] = x.v, j["y"] = y.v, j["w"] = w.v, j["h"] = h.v;
     j["color"] = std::move(color);
     set_hit(j, std::move(hit), std::move(pressed));
     return *this;
 }
 
-Canvas& Canvas::rrect(float x, float y, float w, float h, float radius, std::string color, std::string hit,
+Canvas& Canvas::rrect(Num x, Num y, Num w, Num h, Num radius, std::string color, std::string hit,
                       std::string pressed) {
     Json& j = add("rrect");
-    j["x"] = x, j["y"] = y, j["w"] = w, j["h"] = h, j["r"] = radius;
+    j["x"] = x.v, j["y"] = y.v, j["w"] = w.v, j["h"] = h.v, j["r"] = radius.v;
     j["color"] = std::move(color);
     set_hit(j, std::move(hit), std::move(pressed));
     return *this;
 }
 
-Canvas& Canvas::circle(float cx, float cy, float r, std::string color, std::string hit, std::string pressed) {
+Canvas& Canvas::circle(Num cx, Num cy, Num r, std::string color, std::string hit, std::string pressed) {
     Json& j = add("circle");
-    j["cx"] = cx, j["cy"] = cy, j["r"] = r;
+    j["cx"] = cx.v, j["cy"] = cy.v, j["r"] = r.v;
     j["color"] = std::move(color);
     set_hit(j, std::move(hit), std::move(pressed));
     return *this;
 }
 
-Canvas& Canvas::ring(float cx, float cy, float r, float width, std::string color) {
+Canvas& Canvas::ring(Num cx, Num cy, Num r, Num width, std::string color) {
     Json& j = add("ring");
-    j["cx"] = cx, j["cy"] = cy, j["r"] = r, j["width"] = width;
+    j["cx"] = cx.v, j["cy"] = cy.v, j["r"] = r.v, j["width"] = width.v;
     j["color"] = std::move(color);
     return *this;
 }
 
-Canvas& Canvas::line(float x1, float y1, float x2, float y2, float width, std::string color) {
+Canvas& Canvas::line(Num x1, Num y1, Num x2, Num y2, Num width, std::string color) {
     Json& j = add("line");
-    j["x1"] = x1, j["y1"] = y1, j["x2"] = x2, j["y2"] = y2, j["width"] = width;
+    j["x1"] = x1.v, j["y1"] = y1.v, j["x2"] = x2.v, j["y2"] = y2.v, j["width"] = width.v;
     j["color"] = std::move(color);
     return *this;
 }
 
-Canvas& Canvas::arc(float cx, float cy, float r, float width, float start, float sweep, std::string color) {
+Canvas& Canvas::arc(Num cx, Num cy, Num r, Num width, Num start, Num sweep, std::string color) {
     Json& j = add("arc");
-    j["cx"] = cx, j["cy"] = cy, j["r"] = r, j["width"] = width, j["start"] = start, j["sweep"] = sweep;
+    j["cx"] = cx.v, j["cy"] = cy.v, j["r"] = r.v, j["width"] = width.v, j["start"] = start.v, j["sweep"] = sweep.v;
     j["color"] = std::move(color);
     return *this;
 }
@@ -394,29 +400,39 @@ Canvas& Canvas::poly(std::vector<float> points, std::string color) {
     return *this;
 }
 
-Canvas& Canvas::polyline(std::vector<float> points, float width, std::string color) {
+Canvas& Canvas::polyline(std::vector<float> points, Num width, std::string color) {
     Json& j = add("polyline");
     j["pts"] = points_json(points);
-    j["width"] = width;
+    j["width"] = width.v;
     j["color"] = std::move(color);
     return *this;
 }
 
-Canvas& Canvas::text(float x, float y, float w, float h, std::string text, float size, std::string color,
+Canvas& Canvas::image(Num x, Num y, Num w, Num h, std::string src, std::string fit, Num radius, std::string hit) {
+    Json& j = add("image");
+    j["x"] = x.v, j["y"] = y.v, j["w"] = w.v, j["h"] = h.v;
+    j["src"] = std::move(src);
+    j["fit"] = std::move(fit);
+    j["r"] = radius.v;
+    if (!hit.empty()) j["hit"] = std::move(hit);
+    return *this;
+}
+
+Canvas& Canvas::text(Num x, Num y, Num w, Num h, std::string text, Num size, std::string color,
                      std::string align, std::string font) {
     Json& j = add("text");
-    j["x"] = x, j["y"] = y, j["w"] = w, j["h"] = h;
+    j["x"] = x.v, j["y"] = y.v, j["w"] = w.v, j["h"] = h.v;
     j["text"] = std::move(text);
-    j["size"] = size;
+    j["size"] = size.v;
     j["color"] = std::move(color);
     j["align"] = std::move(align);
     j["font"] = std::move(font);
     return *this;
 }
 
-Canvas& Canvas::icon(float x, float y, float size, std::string name, std::string color) {
+Canvas& Canvas::icon(Num x, Num y, Num size, std::string name, std::string color) {
     Json& j = add("icon");
-    j["x"] = x, j["y"] = y, j["size"] = size;
+    j["x"] = x.v, j["y"] = y.v, j["size"] = size.v;
     j["name"] = std::move(name);
     j["color"] = std::move(color);
     return *this;
@@ -453,13 +469,44 @@ void Plugin::send(const Json& msg) {
     }
 }
 
-void Plugin::set_ui(const Screen& screen) {
-    if (screen.json() == last_ui_) return;
-    last_ui_ = screen.json();
+void Plugin::set_ui(const Screen& screen) { send_ui(screen.json()); }
+void Plugin::set_ui(const FreeScreen& screen) { send_ui(screen.json()); }
+
+void Plugin::send_ui(const Json& root) {
+    if (root == last_ui_) return;
+    last_ui_ = root;
     Json msg = Json::object();
     msg["t"] = "ui";
     msg["root"] = last_ui_;
     send(msg);
+}
+
+FreeScreen::FreeScreen(std::string background) {
+    root_ = Json::object();
+    root_["layout"] = "free";
+    root_["background"] = std::move(background);
+    root_["surfaces"] = Json::array();
+    root_["ops"] = Json::array();
+}
+
+FreeScreen& FreeScreen::surface(std::string id, Num x, Num y, Num w, Num h, std::string fit, bool touch) {
+    Json s = Json::object();
+    s["id"] = std::move(id);
+    s["x"] = x.v, s["y"] = y.v, s["w"] = w.v, s["h"] = h.v;
+    s["fit"] = std::move(fit);
+    if (touch) s["touch"] = true;
+    root_["surfaces"].push_back(std::move(s));
+    return *this;
+}
+
+FreeScreen& FreeScreen::draw(const Canvas& canvas) {
+    for (const auto& op : canvas.ops().items()) root_["ops"].push_back(op);
+    return *this;
+}
+
+FreeScreen& FreeScreen::drag(bool on) {
+    root_["drag"] = on;
+    return *this;
 }
 
 void Plugin::set_tile(const std::string& subtitle) {
@@ -476,6 +523,10 @@ void Plugin::keyboard_ui(float height, const Canvas& canvas) {
     msg["t"] = "keyboard_ui";
     msg["height"] = height;
     msg["ops"] = canvas.ops();
+    // Most keys change nothing on the keyboard itself: the core need not
+    // read, prepare and draw the same drawing again.
+    if (msg == last_keyboard_) return;
+    last_keyboard_ = msg;
     send(msg);
 }
 
@@ -635,6 +686,54 @@ void Plugin::watch_fd(int fd, std::function<void()> on_readable) {
 
 void Plugin::unwatch_fd(int fd) { watched_.erase(fd); }
 
+void Plugin::set_lock_ui(const Screen& screen) {
+    Json msg = Json::object();
+    msg["t"] = "lock_ui";
+    msg["root"] = screen.json();
+    send(msg);
+}
+
+void Plugin::lock_config(bool enabled) {
+    Json msg = Json::object();
+    msg["t"] = "lock_config";
+    msg["enabled"] = enabled;
+    send(msg);
+}
+
+void Plugin::unlock() {
+    Json msg = Json::object();
+    msg["t"] = "unlock";
+    send(msg);
+}
+
+void Plugin::lock_now() {
+    Json msg = Json::object();
+    msg["t"] = "lock";
+    send(msg);
+}
+
+void Plugin::set_shade_ui(const Screen& screen) {
+    Json msg = Json::object();
+    msg["t"] = "shade_ui";
+    msg["root"] = screen.json();
+    send(msg);
+}
+
+void Plugin::shade_action(const std::string& action, const Json& value) {
+    Json msg = Json::object();
+    msg["t"] = "shade_action";
+    msg["action"] = action;
+    if (!value.is_null()) msg["value"] = value;
+    send(msg);
+}
+
+void Plugin::set_rotation(int degrees) {
+    Json msg = Json::object();
+    msg["t"] = "rotation";
+    msg["value"] = degrees;
+    send(msg);
+}
+
 void Plugin::request_display(bool on) {
     if (last_display_ == int(on)) return;
     last_display_ = int(on);
@@ -653,6 +752,7 @@ void Plugin::handle(const Json& msg) {
         surface_dir_ = msg["surface_dir"].str();
         screen_w_ = msg["screen"]["w"].as_int();
         screen_h_ = msg["screen"]["h"].as_int();
+        scale_ = float(msg["scale"].as_number(0));
         endpoints_ = msg["endpoints"];
         gl_dir_ = msg["gl_dir"].str();
         gpu_buffers_ = msg["gpu_buffers"].as_bool(false);
@@ -662,6 +762,7 @@ void Plugin::handle(const Json& msg) {
         catalog_.set_language(i18n::normalize(msg["locale"].str()));
         if (msg["timezone"].is_string()) apply_timezone(msg["timezone"].str());
         content_width_ = msg["content_width"].as_int(content_width_);
+        if (msg["scale"].is_number()) scale_ = float(msg["scale"].as_number());
         if (msg["screen"].is_object()) {
             screen_w_ = msg["screen"]["w"].as_int(screen_w_);
             screen_h_ = msg["screen"]["h"].as_int(screen_h_);
@@ -692,7 +793,9 @@ void Plugin::handle(const Json& msg) {
         if (it != surfaces_.end()) {
             it->second->waiting_ = false;
             it->second->shown_gpu_ = msg["gpu"].as_int(-1);
-            if (on_surface_shown) on_surface_shown(it->first);
+            std::string id = it->first;
+            if (it->second->shown_hook_) it->second->shown_hook_();
+            if (on_surface_shown) on_surface_shown(id);
         }
     } else if (t == "touch") {
         if (on_touch)
@@ -735,6 +838,7 @@ void Plugin::handle(const Json& msg) {
             on_event(msg["id"].str(), msg["value"]);
         }
     } else if (t == "keyboard_show") {
+        last_keyboard_ = Json();  // a newly opened keyboard is always drawn
         std::vector<std::string> langs;
         for (const auto& l : msg["langs"].items()) langs.push_back(l.str());
         if (on_keyboard_show) on_keyboard_show(msg["mode"].as_string("text"), float(msg["width"].as_number(400)), langs);
@@ -743,6 +847,7 @@ void Plugin::handle(const Json& msg) {
     } else if (t == "keyboard_hide") {
         if (on_keyboard_hide) on_keyboard_hide();
     } else if (t == "layout") {
+        if (msg["scale"].is_number()) scale_ = float(msg["scale"].as_number());
         if (msg["screen"].is_object()) {
             screen_w_ = msg["screen"]["w"].as_int(screen_w_);
             screen_h_ = msg["screen"]["h"].as_int(screen_h_);
@@ -761,6 +866,12 @@ void Plugin::handle(const Json& msg) {
         if (on_activity) on_activity();
     } else if (t == "shutdown") {
         running_ = false;
+    } else if (t == "locked") {
+        if (on_locked) on_locked(msg["value"].as_bool());
+    } else if (t == "shade_state") {
+        if (on_shade_state) on_shade_state(msg);
+    } else if (on_message) {
+        on_message(msg);
     }
 }
 

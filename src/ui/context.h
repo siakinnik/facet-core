@@ -91,6 +91,8 @@ public:
     // with a back button returns HeaderHit::Back. take_back() is true (and
     // clears it) when no screen took it.
     bool press_back();  // true: it closed a popup
+    // The current screen does not scroll with this touch (a widget follows the finger).
+    void stop_scroll();
     bool take_back() {
         bool b = back_;
         back_ = false;

@@ -1,0 +1,12 @@
+{
+  "id": "example-video",
+  "name": { "en": "Video demo", "ru": "Демо видео" },
+  "version": "0.1.0",
+  "api": 3,
+  "exec": "video",
+  "permissions": [
+    "display.surface",
+    { "name": "audio", "optional": true }
+  ],
+  "tile": { "icon": "display" }
+}

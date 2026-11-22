@@ -1,6 +1,7 @@
 // Headless backend for automated checks: renders off-screen and replays a
 // script (FACET_SCRIPT file), one command per line:
 //   wait <sec> | tap <x> <y> | down <x> <y> | move <x> <y> | up <x> <y>
+//   type <text> (into the focused field, as on the keyboard) | enter |
 //   key <name> | keydown <name> | keyup <name> (back, home, menu, apps,
 //   power, volume-up, volume-down, mute) | shot <file.ppm> | quit
 #include <chrono>
@@ -58,6 +59,15 @@ public:
             } else if (cmd == "down" || cmd == "move" || cmd == "up") {
                 in >> x >> y;
                 out.push_back({cmd == "down" ? EventType::Down : cmd == "up" ? EventType::Up : EventType::Move, x, y});
+            } else if (cmd == "type" || cmd == "enter") {
+                Event e{EventType::Text};
+                if (cmd == "type") {
+                    std::getline(in, e.text);
+                    if (!e.text.empty() && e.text[0] == ' ') e.text.erase(0, 1);
+                } else {
+                    e.text = "\n";
+                }
+                out.push_back(e);
             } else if (cmd == "key" || cmd == "keydown" || cmd == "keyup") {
                 std::string name;
                 in >> name;

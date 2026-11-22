@@ -19,6 +19,23 @@ constexpr int kApiVersion = 3;
 // Version of the SDK this plugin is built with ("0.3.0-alpha").
 const char* sdk_version();
 
+// A number in a drawing: dp, or relative to the box it is drawn in, so a
+// design follows the screen's size: Num::of(1, 0, -40) is the box width
+// minus 40 dp, Num::of(0, 0.5) half its height. Plain numbers are dp.
+struct Num {
+    Json v;
+    Num(float dp) : v(dp) {}
+    Num(double dp) : v(dp) {}
+    Num(int dp) : v(dp) {}
+    // a * width + b * height + k dp of the box (core 0.8+).
+    static Num of(double a, double b = 0, double k = 0) {
+        Num n(0);
+        n.v = Json::object();
+        n.v["w"] = a, n.v["h"] = b, n.v["k"] = k;
+        return n;
+    }
+};
+
 // Custom drawing for a `canvas` widget: a list of draw operations the core
 // renders with its own rasterizer. Coordinates and sizes are in dp relative to
 // the canvas' top-left corner; the canvas is as wide as the content column
@@ -32,26 +49,33 @@ const char* sdk_version();
 // colour) at once, without a round trip to the plugin.
 class Canvas {
 public:
-    Canvas& rect(float x, float y, float w, float h, std::string color, std::string hit = {},
+    Canvas& rect(Num x, Num y, Num w, Num h, std::string color, std::string hit = {},
                  std::string pressed = {});
-    Canvas& rrect(float x, float y, float w, float h, float radius, std::string color, std::string hit = {},
+    Canvas& rrect(Num x, Num y, Num w, Num h, Num radius, std::string color, std::string hit = {},
                   std::string pressed = {});
-    Canvas& circle(float cx, float cy, float r, std::string color, std::string hit = {}, std::string pressed = {});
-    Canvas& ring(float cx, float cy, float r, float width, std::string color);
-    Canvas& line(float x1, float y1, float x2, float y2, float width, std::string color);
+    Canvas& circle(Num cx, Num cy, Num r, std::string color, std::string hit = {}, std::string pressed = {});
+    Canvas& ring(Num cx, Num cy, Num r, Num width, std::string color);
+    Canvas& line(Num x1, Num y1, Num x2, Num y2, Num width, std::string color);
     // Part of a ring with round ends: angles in degrees, 0 = 12 o'clock,
     // clockwise (gauges, progress).
-    Canvas& arc(float cx, float cy, float r, float width, float start, float sweep, std::string color);
+    Canvas& arc(Num cx, Num cy, Num r, Num width, Num start, Num sweep, std::string color);
     // Filled polygon and a stroked open line through points {x0, y0, x1, y1, ...}
     // (charts). At most 1024 points each.
     Canvas& poly(std::vector<float> points, std::string color);
-    Canvas& polyline(std::vector<float> points, float width, std::string color);
+    Canvas& polyline(std::vector<float> points, Num width, std::string color);
     // Text vertically centred in the box; align: "start", "center", "end";
     // font: "regular", "medium", "light". Too long text is ellipsized.
-    Canvas& text(float x, float y, float w, float h, std::string text, float size, std::string color,
+    Canvas& text(Num x, Num y, Num w, Num h, std::string text, Num size, std::string color,
                  std::string align = "start", std::string font = "regular");
     // Built-in icon by name (see manifest tile icons), `size` dp square.
-    Canvas& icon(float x, float y, float size, std::string name, std::string color);
+    Canvas& icon(Num x, Num y, Num size, std::string name, std::string color);
+    // A picture (PNG / JPEG): "plugin/<file>" from the module's folder or
+    // "data/<file>" from its data folder (e.g. a poster it downloaded; it is
+    // read again when the file changes). fit: "contain" (all of it),
+    // "cover" (fills the box, cut to it), "fill" (stretched). With `hit` it
+    // is a touch target too (core 0.9+).
+    Canvas& image(Num x, Num y, Num w, Num h, std::string src, std::string fit = "contain", Num radius = 0,
+                  std::string hit = {});
 
     const Json& ops() const { return ops_; }
 
@@ -110,6 +134,8 @@ public:
 
 private:
     friend class Plugin;
+    friend class Video;
+    std::function<void()> shown_hook_;  // SDK helpers (Video): the core took the last frame
     Plugin* plugin_ = nullptr;
     std::string id_;
     std::string for_;
@@ -134,8 +160,11 @@ public:
     Screen& time(std::string id, std::string label, int minutes, int step = 15);
     Screen& level(std::string label, double value, std::string text = {});
     Screen& button(std::string id, std::string label, std::string style = "normal");
-    // Free drawing area, full content width, `height` dp tall.
-    Screen& canvas(std::string id, float height, const Canvas& canvas);
+    // Free drawing area, full content width, `height` dp tall. With `drag`
+    // the finger is followed (core 0.9+): event(id, {"phase": "down" | "move"
+    // | "up", "x": dp, "y": dp}) from the canvas' top-left corner, and the
+    // screen does not scroll under it (patterns, sliders, signatures).
+    Screen& canvas(std::string id, float height, const Canvas& canvas, bool drag = false);
     // A Surface, full content width; height 0 keeps its aspect ratio.
     Screen& surface(std::string id, float height = 0);
     // Shows the Surface over the whole screen instead of the widgets (the
@@ -148,10 +177,44 @@ public:
     Screen& text_field(std::string id, std::string label, std::string value, std::string placeholder = {},
                        bool secure = false, std::string mode = "text", int max_length = 256);
 
+    // Back (the header's arrow, the Back button) goes to the module as
+    // event("__back") instead of leaving it, for screens of its own (core 0.9+).
+    // Two Backs in a row still leave.
+    Screen& handles_back(bool on = true);
+
     const Json& json() const { return root_; }
 
 private:
     Json& add(const char* type);
+    Json root_;
+};
+
+// A screen the module draws freely instead of the list of widgets (core
+// 0.9+): a background, surfaces placed anywhere (video, camera), and its
+// own drawing over them (titles, buttons, pictures; Canvas in dp over the
+// whole screen, Num::of() for sizes relative to it). Taps on drawn targets
+// arrive as event("screen", hit id). Facet keeps the top edge: a swipe down
+// from it (or the Back button) leaves the screen.
+//
+//     FreeScreen s("#000000");
+//     s.surface("tv", 0, 0, Num::of(1), Num::of(0, 1), "contain");
+//     Canvas over;
+//     over.rrect(16, 16, 120, 44, 22, "#00000080", "back").text(16, 16, 120, 44, "Back", 16, "#FFFFFF", "center");
+//     s.draw(over);
+//     plugin.set_ui(s);
+class FreeScreen {
+public:
+    explicit FreeScreen(std::string background = "bg");
+    // fit: "contain" (all of it, bars around), "cover" (fills, cut), "fill" (stretched).
+    // touch: its touches go to on_touch, in its pixels.
+    FreeScreen& surface(std::string id, Num x, Num y, Num w, Num h, std::string fit = "contain", bool touch = false);
+    // Drawing over the surfaces; several calls draw in order.
+    FreeScreen& draw(const Canvas& canvas);
+    // The finger's way over the screen: event("screen", {"phase", "x", "y"}).
+    FreeScreen& drag(bool on = true);
+    const Json& json() const { return root_; }
+
+private:
     Json root_;
 };
 
@@ -224,6 +287,21 @@ public:
     // Called when the content width changed (e.g. another screen size).
     std::function<void(int content_width)> on_layout;
     std::function<void()> on_activity;
+
+    // ---- System modules (core 0.9+).
+    // Lock screen (provides "system.lock", permission "system.lock"): the core
+    // locks (at start when a lock is set, when the screen goes off, on
+    // lock_now()) and unlocks only on unlock(). Show the lock with
+    // set_lock_ui(); it covers everything, and nothing else can be used.
+    std::function<void(bool locked)> on_locked;
+    // Shade (provides "system.shade", permission "system.shade"): the state to
+    // show when the user pulls the shade down: {"open", "notifications": [{"key",
+    // "app", "title", "body", "age_s", "icon", "kind"}], "wifi": {"available",
+    // "enabled", "ssid"}, "brightness": {"available", "value"}, "volume":
+    // {"available", "value"}, "rotation": {"available", "auto"}, "time"}.
+    std::function<void(const Json& state)> on_shade_state;
+    // Messages this SDK does not know (newer cores).
+    std::function<void(const Json& msg)> on_message;
     std::function<void()> on_tick;
     std::function<void()> on_shutdown;
 
@@ -275,6 +353,9 @@ public:
     const std::string& surface_dir() const { return surface_dir_; }
     // The whole screen in pixels (a full-screen Surface should match it).
     int screen_width() const { return screen_w_; }
+    // The screen in dp, the unit of drawings (core 0.9+; 0 before).
+    float screen_dp_width() const { return scale_ > 0 ? float(screen_w_) / scale_ : 0; }
+    float screen_dp_height() const { return scale_ > 0 ? float(screen_h_) / scale_ : 0; }
     int screen_height() const { return screen_h_; }
     // Width of the content column in dp: the width of canvas widgets.
     int content_width() const { return content_width_; }
@@ -303,6 +384,23 @@ public:
 
     // Senders skip messages identical to the previously sent value.
     void set_ui(const Screen& screen);
+    void set_ui(const FreeScreen& screen);
+    // Lock screen modules: the lock screen's tree, whether a lock is set up
+    // (then the core locks at start, before this module even runs), and the
+    // verdicts.
+    void set_lock_ui(const Screen& screen);
+    void lock_config(bool enabled);
+    void unlock();
+    void lock_now();
+    // Shade modules: the shade's tree and what the user did in it: "open"
+    // (key), "dismiss" (key), "clear", "wifi" (bool), "brightness" (0..100),
+    // "volume" (0..100), "rotation_auto" (bool), "screen_off", "settings",
+    // "wifi_settings", "close".
+    void set_shade_ui(const Screen& screen);
+    void shade_action(const std::string& action, const Json& value = Json());
+    // Rotation modules (permission "display.rotation"): turn the picture
+    // clockwise by 0, 90, 180 or 270 degrees to stay upright.
+    void set_rotation(int degrees);
     void set_tile(const std::string& subtitle);
     void request_display(bool on);
 
@@ -364,12 +462,15 @@ private:
     int content_width_ = 440;
     bool running_ = true;
     Json last_ui_;
+    Json last_keyboard_;  // the keyboard drawing last sent (unchanged ones are not sent again)
     std::string last_tile_;
     int last_display_ = -1;
     std::vector<std::string> permissions_;
     Json last_badge_, last_icon_;
     std::string surface_dir_;
     int screen_w_ = 0, screen_h_ = 0;
+    float scale_ = 0;  // pixels per dp
+    void send_ui(const Json& root);
     std::map<std::string, Surface*> surfaces_;
     Json endpoints_;
     std::string gl_dir_, gpu_device_;

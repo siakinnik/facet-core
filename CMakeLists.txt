@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(facet VERSION 0.8.3 LANGUAGES CXX)
+project(facet VERSION 0.9.0 LANGUAGES CXX)
 set(FACET_VERSION_SUFFIX "alpha")  # pre-release tag; empty for final releases
 
 set(CMAKE_CXX_STANDARD 20)
@@ -17,18 +17,22 @@ add_subdirectory(sdk)
 add_executable(facet
     src/main.cpp
     src/app/app.cpp
+    src/app/images.cpp
     src/app/keyboard.cpp
     src/app/overlays.cpp
     src/app/screens.cpp
+    src/app/system_ui.cpp
     src/core/build_info.cpp
     src/core/config.cpp
     src/core/log.cpp
     src/core/netstatus.cpp
     src/core/timezone.cpp
+    src/core/wifi.cpp
     src/i18n/i18n.cpp
     src/i18n/ru.cpp
     src/gfx/canvas.cpp
     src/gfx/font.cpp
+    src/gfx/image.cpp
     src/gfx/raster.cpp
     src/gfx/recorder.cpp
     src/gpu/channel.cpp
@@ -55,6 +59,7 @@ add_executable(facet
     src/ui/theme.cpp
 )
 target_include_directories(facet PRIVATE src)
+target_include_directories(facet SYSTEM PRIVATE third_party/stb)
 if(FACET_VERSION_SUFFIX)
     set(FACET_VERSION_STRING "${PROJECT_VERSION}-${FACET_VERSION_SUFFIX}")
 else()
@@ -119,6 +124,7 @@ if(FACET_BUILD_EXAMPLES)
     add_subdirectory(examples/pinpad)
     add_subdirectory(examples/showcase)
     add_subdirectory(examples/theme-demo)
+    add_subdirectory(examples/video)
 endif()
 
 install(TARGETS facet RUNTIME DESTINATION bin)

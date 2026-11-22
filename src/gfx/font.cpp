@@ -24,6 +24,7 @@ bool Font::load(const std::string& path) {
     static uint32_t loads = 0;
     id_ = ++loads;
     cache_.clear();
+    widths_.clear();
 
     uint32_t base = 0;
     if (u32(0) == tag("ttcf")) base = u32(12);  // first face of a collection
@@ -311,9 +312,16 @@ const Glyph& Font::glyph(uint32_t cp, int px) {
 }
 
 float Font::measure(std::string_view text, int px) {
+    // Layout measures the same labels every frame: remembered by a hash of text and size.
+    uint64_t key = std::hash<std::string_view>{}(text) * 1000003u ^ uint64_t(px);
+    auto it = widths_.find(key);
+    if (it != widths_.end()) return it->second;
+    if (widths_.size() > 4096) widths_.clear();
+    float& out = widths_[key];
     float w = 0;
     size_t i = 0;
     while (i < text.size()) w += glyph(utf8_next(text, i), px).advance;
+    out = w;
     return w;
 }
 

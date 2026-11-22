@@ -148,6 +148,12 @@ struct Plugin {
     std::optional<bool> display;
     bool visible = false;
 
+    // System UI modules: the lock screen (system.lock) and the shade (system.shade) trees.
+    Json lock_ui, shade_ui;
+    // Counts the trees and keyboard drawings received: drawings prepared for
+    // one stay valid until the next.
+    uint64_t ui_gen = 0;
+
     // Keyboard plugins: the drawing they last sent for the open keyboard.
     Json keyboard_ops;
     float keyboard_height = 0;
@@ -193,6 +199,13 @@ struct SurfaceRef {
     const Plugin* owner = nullptr;  // gets the touches and the typed text
     const SurfaceBuffer* buffer = nullptr;
     explicit operator bool() const { return buffer != nullptr; }
+};
+
+// A request of a system module (lock screen, shade, rotation) for the app:
+// kind "lock_config", "unlock", "lock", "shade_action", "rotation".
+struct SystemRequest {
+    std::string plugin, kind;
+    Json msg;
 };
 
 // A plugin that runs while none of its screens is open.
@@ -279,7 +292,7 @@ public:
     void set_locale(const std::string& lang);
     void set_timezone(const std::string& zone);  // "" = system zone
     void set_content_width(int dp);              // width of canvas widgets
-    void set_screen_size(int w, int h);          // in pixels, for full-screen surfaces
+    void set_screen_size(int w, int h, float scale = 1);  // in pixels (and pixels per dp), for full-screen surfaces
     // Input for a plugin's surface: a finger in surface pixels, or typed text.
     void send_touch(const std::string& id, const std::string& surface, const char* kind, float x, float y);
     void send_text(const std::string& id, const std::string& action, const std::string& text);
@@ -309,6 +322,13 @@ public:
     std::optional<bool> display_policy(double now);
     // The plugin runs and holds a wake lock (video, a call): its screen stays.
     bool holds_wake_lock(const std::string& id) const;
+
+    // ---- System modules. The enabled module that provides `capability` and
+    // was granted `permission` (the first by id), whether it runs or not.
+    Plugin* system_provider(const std::string& capability, const std::string& permission);
+    std::vector<SystemRequest> take_requests() { return std::move(requests_); }
+    // Sends a message to a running plugin (system modules' notifications).
+    void send_to(const std::string& id, const Json& msg);
 
     // ---- Keyboard plugins (provide input.keyboard).
     bool keyboard_ready(const std::string& id) const;  // running and has drawn itself
@@ -368,7 +388,9 @@ private:
     std::string timezone_;
     int content_width_ = 440;
     int screen_w_ = 0, screen_h_ = 0;
+    float scale_ = 1;
     std::vector<InputAction> input_;
+    std::vector<SystemRequest> requests_;
     bool changed_ = true;
     std::deque<PermissionPrompt> prompts_;
     NotificationCenter notifications_;
