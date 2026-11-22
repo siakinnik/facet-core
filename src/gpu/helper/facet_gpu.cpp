@@ -1450,6 +1450,7 @@ private:
         glScissor(p.x, ph_ - (p.y + p.h), std::max(0, p.w), std::max(0, p.h));
     }
 
+public:
     // The picture turned clockwise by `deg` on the panel (the core draws it
     // at the turned size): everything is drawn again.
     void set_rotation(int deg) {
@@ -1463,6 +1464,7 @@ private:
         hist_.clear();
     }
 
+private:
     void quad(const Texture& t, const Rect& d) {
         if (!t.id) return;
         // Attribute arrays are context state shared by both programs: only
